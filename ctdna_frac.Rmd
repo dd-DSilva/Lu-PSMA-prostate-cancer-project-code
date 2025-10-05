@@ -1,0 +1,300 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+Collect the ctDNA fraction from all patients
+
+```{r}
+library(readxl)
+library(dplyr)
+library(ggplot2)
+library(cowplot)
+library(purrr)  # Needed for map2_dfr()
+
+# Load data
+clinical_data <- read_excel("C:/Users/Daniel/OneDrive - Monash University/Documents/University/GNA5900/clinical_data.xlsx")
+
+# Filter groups
+good_responders <- clinical_data %>% filter(`Reason for cessation (numbered)` == 1)
+standard_responders <- clinical_data %>% filter(`Reason for cessation (numbered)` == 2)
+poor_responders <- clinical_data %>% filter(`Reason for cessation (numbered)` == 3)
+
+# IQR summary function
+get_iqr_summary <- function(data, responder_label) {
+  timepoint_vars <- c("ctDNA fraction_1.0", "ctDNA fraction_1.1",
+                      "ctDNA fraction_1.2", "ctDNA fraction_1.3/2.0")
+  timepoints <- c("Baseline", "6 weeks", "18 weeks", "Progression")
+  
+  map2_dfr(timepoint_vars, timepoints, function(tp_var, tp_label) {
+    values <- as.numeric(data[[tp_var]])
+    tibble(
+      ctDNA = median(values, na.rm = TRUE),
+      iqr_low = quantile(values, probs = 0.25, na.rm = TRUE),
+      iqr_high = quantile(values, probs = 0.75, na.rm = TRUE),
+      timepoints = factor(tp_label, levels = timepoints),
+      responder_type = responder_label
+    )
+  })
+}
+
+# Create summary data frames
+ER_df <- get_iqr_summary(good_responders, "Exceptional")
+SR_df <- get_iqr_summary(standard_responders, "Standard")
+PR_df <- get_iqr_summary(poor_responders, "Poor")
+
+# Combine for plotting
+combined_df <- bind_rows(ER_df, SR_df, PR_df)
+
+# Plot
+line_plot <- ggplot(combined_df, aes(x = timepoints, y = ctDNA, colour = responder_type, group = responder_type)) +
+  geom_errorbar(aes(ymin = iqr_low, ymax = iqr_high), width = 0.2, alpha = 0.5) +
+  geom_line() +
+  geom_point(size = 2) +
+  labs(x = "Time", y = "ctDNA fraction (median ± IQR)", colour = "Responder Type") +
+  scale_colour_manual(values = c("Exceptional" = "#1f77b4", "Standard" = "#FFD700", "Poor" = "#d62728")) +
+  theme_cowplot()
+
+line_plot
+
+ggsave("C:/Users/Daniel/OneDrive - Monash University/Documents/University/GNA5900/figures/ctdna_plot_line.png",
+       plot = line_plot,
+       dpi = 600)
+```
+
+```{r}
+compute_delta <- function(df, label) {
+  tibble(
+    delta = as.numeric(df$`ctDNA fraction_1.1`) - as.numeric(df$`ctDNA fraction_1.0`),
+    responder_type = label
+  )
+}
+
+# Apply to each group
+delta_ER <- compute_delta(good_responders, "Exceptional")
+delta_SR <- compute_delta(standard_responders, "Standard")
+delta_PR <- compute_delta(poor_responders, "Poor")
+
+# Combine
+delta_df <- bind_rows(delta_ER, delta_SR, delta_PR)
+
+# Plot
+delta_plot <- ggplot(delta_df, aes(x = responder_type, y = delta, fill = responder_type)) +
+  geom_boxplot(width = 0.6, outlier.shape = 16, outlier.size = 2) +
+  labs(x = "Responder Type", y = "Δ ctDNA fraction", fill = "Responder Type") +
+  scale_fill_manual(values = c("Exceptional" = "#1f77b4", "Standard" = "#FFD700", "Poor" = "#d62728")) +
+  theme_cowplot() +
+  theme(legend.position = "bottom")
+
+delta_plot
+```
+
+Makes a boxplot of the baseline data.
+#```{r, fig.height=10, fig.width=8}
+```{r}
+library(ggpubr)
+
+ER_baseline_data <- good_responders %>%
+  transmute(PMC_ID, ctDNA_1.0 = `ctDNA fraction_1.0`, ctDNA_1.1 = `ctDNA fraction_1.1`, ctDNA_1.2 = `ctDNA fraction_1.2`, ctDNA_1.3 = `ctDNA fraction_1.3/2.0`, responder_type = "Exceptional")
+
+SR_baseline_data <- standard_responders %>%
+  transmute(PMC_ID, ctDNA_1.0 = `ctDNA fraction_1.0`, ctDNA_1.1 = `ctDNA fraction_1.1`, ctDNA_1.2 = `ctDNA fraction_1.2`, ctDNA_1.3 = `ctDNA fraction_1.3/2.0`, responder_type = "Standard")
+
+PR_baseline_data <- poor_responders %>%
+  transmute(PMC_ID, ctDNA_1.0 = `ctDNA fraction_1.0`, ctDNA_1.1 = `ctDNA fraction_1.1`, ctDNA_1.2 = `ctDNA fraction_1.2`, ctDNA_1.3 = `ctDNA fraction_1.3/2.0`, responder_type = "Poor")
+
+baseline_data <- bind_rows(ER_baseline_data, SR_baseline_data, PR_baseline_data)
+baseline_data$ctDNA_1.1 <- as.numeric(baseline_data$ctDNA_1.1)
+baseline_data_wk6 <- baseline_data %>%
+  filter(!is.na(ctDNA_1.1))
+
+baseline_data$ctDNA_1.2 <- as.numeric(baseline_data$ctDNA_1.2)
+baseline_data$ctDNA_1.3 <- as.numeric(baseline_data$ctDNA_1.3)
+
+baseline_data %>%
+  filter(!is.na(ctDNA_1.2)) %>%
+  group_by(responder_type) %>%
+  summarise(
+    min_1.2 = min(ctDNA_1.2, na.rm = TRUE),
+    Q1_1.2 = quantile(ctDNA_1.2, 0.25, na.rm = TRUE),
+    median_1.2 = median(ctDNA_1.2, na.rm = TRUE),
+    Q3_1.2 = quantile(ctDNA_1.2, 0.75, na.rm = TRUE),
+    max_1.2 = max(ctDNA_1.2, na.rm = TRUE)
+  )
+
+
+# Baseline
+baseline_boxplot <- ggplot(baseline_data, aes(x = responder_type, y = ctDNA_1.0, fill = responder_type)) +
+  geom_boxplot(width = 0.6, outlier.shape = 16, outlier.size = 2) +
+  labs(
+    x = "Responder Type",
+    y = "ctDNA fraction",
+  ) +
+  scale_fill_manual(values = c("Exceptional" = "#1f77b4", "Standard" = "#FFD700", "Poor" = "#d62728")) +
+  theme_cowplot() +
+  theme(legend.position = "none") + 
+  stat_compare_means(method = "wilcox.test", 
+                     comparisons = list(c("Exceptional", "Poor"), 
+                                        #c("Exceptional", "Standard"),
+                                        c("Poor", "Standard")),
+                     label = "p.signif",
+                     hide.ns = TRUE,
+                     symnum.args = list(cutpoints = c(0, 0.001, 0.01, 0.05, 1), 
+                                      symbols = c("***", "**", "*", "ns")))
+
+# Week 6
+wk6_boxplot <- ggplot(baseline_data_wk6, aes(x = responder_type, y = ctDNA_1.1, fill = responder_type)) +
+  geom_boxplot(width = 0.6, outlier.shape = 16, outlier.size = 2) +
+  labs(
+    x = "Responder Type",
+    y = "ctDNA fraction",
+  ) +
+  scale_y_continuous(labels = scales::number_format(accuracy = 0.01)) +
+  scale_fill_manual(values = c("Exceptional" = "#1f77b4", "Standard" = "#FFD700", "Poor" = "#d62728")) +
+  theme_cowplot() +
+  theme(legend.position = "none") + 
+  stat_compare_means(method = "wilcox.test", 
+                     comparisons = list(c("Exceptional", "Poor"), 
+                                        #c("Exceptional", "Standard"),
+                                        c("Poor", "Standard")),
+                     label = "p.signif",
+                     hide.ns = TRUE,
+                     symnum.args = list(cutpoints = c(0, 0.001, 0.01, 0.05, 1), 
+                                      symbols = c("***", "**", "*", "ns")))
+# Combine plots
+plot_row_top <- plot_grid(line_plot + theme(plot.margin = margin(t = 8)), labels=c("A"))
+plot_row_bottom <- plot_grid(
+  baseline_boxplot +
+  theme(plot.margin = margin(t = 30)),
+  wk6_boxplot +
+  theme(plot.margin = margin(t = 30)),
+  labels = c("B", "C")
+)
+
+plot_row_bottom
+
+# Adds overall figure title
+# title <- ggdraw() + 
+#   draw_label(
+#     "ctDNA fraction during initial treatment",
+#     fontface = 'bold',
+#     x = 0,
+#     hjust = 0
+#   ) +
+#   theme(
+#     plot.margin = margin(0, 0, 0, 7)
+#   )
+combined_plot <- plot_grid(
+  plot_row_top, plot_row_bottom,
+  ncol = 1,
+  rel_heights = c(1, 1)
+)
+
+ggsave("C:/Users/Daniel/OneDrive - Monash University/Documents/University/GNA5900/figures/ctdna_plot_combined.png",
+       plot = combined_plot,
+       dpi = 600)
+```
+
+
+Performs statistical testing on data.
+```{r}
+library(car)
+
+ER_baseline_data <- good_responders %>%
+  transmute(PMC_ID, ctDNA_1.0 = `ctDNA fraction_1.0`, ctDNA_1.1 =  as.numeric(`ctDNA fraction_1.1`), ctDNA_1.2 = as.numeric(`ctDNA fraction_1.2`), ctDNA_1.3 = as.numeric(`ctDNA fraction_1.3/2.0`)) %>%
+  filter(!is.na(ctDNA_1.1))
+PR_baseline_data <- poor_responders %>%
+  transmute(PMC_ID, ctDNA_1.0 = `ctDNA fraction_1.0`, ctDNA_1.1 =  as.numeric(`ctDNA fraction_1.1`), ctDNA_1.2 = as.numeric(`ctDNA fraction_1.2`), ctDNA_1.3 =as.numeric(`ctDNA fraction_1.3/2.0`)) %>%
+  filter(!is.na(ctDNA_1.1))
+SR_baseline_data <- standard_responders %>%
+  transmute(PMC_ID, ctDNA_1.0 = `ctDNA fraction_1.0`, ctDNA_1.1 =  as.numeric(`ctDNA fraction_1.1`), ctDNA_1.2 = as.numeric(`ctDNA fraction_1.2`), ctDNA_1.3 = as.numeric(`ctDNA fraction_1.3/2.0`)) %>%
+  filter(!is.na(ctDNA_1.1))
+
+combined_ctdna_data <- bind_rows(ER_baseline_data, PR_baseline_data)
+combined_ctdna_data <- bind_rows(combined_ctdna_data, SR_baseline_data)
+
+ER_baseline_data <- good_responders %>%
+  transmute(PMC_ID, responder_type = "ER",
+            ctDNA_1.0 = `ctDNA fraction_1.0`,
+            ctDNA_1.1 = as.numeric(`ctDNA fraction_1.1`),
+            ctDNA_1.2 = as.numeric(`ctDNA fraction_1.2`),
+            ctDNA_1.3 = as.numeric(`ctDNA fraction_1.3/2.0`)) %>%
+  filter(!is.na(ctDNA_1.1))
+
+PR_baseline_data <- poor_responders %>%
+  transmute(PMC_ID, responder_type = "PR",
+            ctDNA_1.0 = `ctDNA fraction_1.0`,
+            ctDNA_1.1 = as.numeric(`ctDNA fraction_1.1`),
+            ctDNA_1.2 = as.numeric(`ctDNA fraction_1.2`),
+            ctDNA_1.3 = as.numeric(`ctDNA fraction_1.3/2.0`)) %>%
+  filter(!is.na(ctDNA_1.1))
+
+SR_baseline_data <- standard_responders %>%
+  transmute(PMC_ID, responder_type = "SR",
+            ctDNA_1.0 = `ctDNA fraction_1.0`,
+            ctDNA_1.1 = as.numeric(`ctDNA fraction_1.1`),
+            ctDNA_1.2 = as.numeric(`ctDNA fraction_1.2`),
+            ctDNA_1.3 = as.numeric(`ctDNA fraction_1.3/2.0`)) %>%
+  filter(!is.na(ctDNA_1.1))
+
+combined_ctdna_data <- bind_rows(ER_baseline_data, PR_baseline_data, SR_baseline_data)
+
+# Wilcoxon rank-sum test (Mann-Whitney U test)
+wilcox.test(ER_baseline_data$ctDNA_1.0, PR_baseline_data$ctDNA_1.0)
+wilcox.test(ER_baseline_data$ctDNA_1.0, SR_baseline_data$ctDNA_1.0)
+wilcox.test(SR_baseline_data$ctDNA_1.0, PR_baseline_data$ctDNA_1.0)
+
+wilcox.test(ER_baseline_data$ctDNA_1.1, PR_baseline_data$ctDNA_1.1)
+wilcox.test(ER_baseline_data$ctDNA_1.1, SR_baseline_data$ctDNA_1.1)
+wilcox.test(SR_baseline_data$ctDNA_1.1, PR_baseline_data$ctDNA_1.1)
+
+
+filter(!is.na(ctDNA_1.1))
+# kruskal.test(ctDNA_1.0 ~ responder_type, data = combined_ctdna_data)
+# kruskal.test(ctDNA_1.1 ~ responder_type, data = combined_ctdna_data)
+
+#bartlett.test(ctDNA_1.0 ~ responder_type, data = combined_ctdna_data)
+
+ER_baseline_data <- good_responders %>%
+  transmute(PMC_ID, responder_type = "ER",
+            ctDNA_1.0 = `ctDNA fraction_1.0`,
+            ctDNA_1.1 = as.numeric(`ctDNA fraction_1.1`),
+            ctDNA_1.2 = as.numeric(`ctDNA fraction_1.2`),
+            ctDNA_1.3 = as.numeric(`ctDNA fraction_1.3/2.0`)) %>%
+  filter(!is.na(ctDNA_1.1))
+
+PR_baseline_data <- poor_responders %>%
+  transmute(PMC_ID, responder_type = "PR",
+            ctDNA_1.0 = `ctDNA fraction_1.0`,
+            ctDNA_1.1 = as.numeric(`ctDNA fraction_1.1`),
+            ctDNA_1.2 = as.numeric(`ctDNA fraction_1.2`),
+            ctDNA_1.3 = as.numeric(`ctDNA fraction_1.3/2.0`)) %>%
+  filter(!is.na(ctDNA_1.1))
+
+SR_baseline_data <- standard_responders %>%
+  transmute(PMC_ID, responder_type = "SR",
+            ctDNA_1.0 = `ctDNA fraction_1.0`,
+            ctDNA_1.1 = as.numeric(`ctDNA fraction_1.1`),
+            ctDNA_1.2 = as.numeric(`ctDNA fraction_1.2`),
+            ctDNA_1.3 = as.numeric(`ctDNA fraction_1.3/2.0`)) %>%
+  filter(!is.na(ctDNA_1.1))
+
+combined_ctdna_data <- bind_rows(ER_baseline_data, PR_baseline_data, SR_baseline_data)
+
+combined_ctdna_data %>%
+  group_by(responder_type) %>%
+  summarise(shapiro_p = shapiro.test(ctDNA_1.1)$p.value)
+
+leveneTest(ctDNA_1.1 ~ responder_type, data = combined_ctdna_data)
+
+## Generates 5-figure summary (change timepoint manually)
+combined_ctdna_data %>%
+  group_by(responder_type) %>%
+  summarise(
+    min = min(ctDNA_1.0, na.rm = TRUE),
+    Q1 = quantile(ctDNA_1.0, 0.25, na.rm = TRUE),
+    median = median(ctDNA_1.0, na.rm = TRUE),
+    Q3 = quantile(ctDNA_1.0, 0.75, na.rm = TRUE),
+    max = max(ctDNA_1.0, na.rm = TRUE)
+  )
+```

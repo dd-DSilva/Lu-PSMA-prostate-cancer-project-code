@@ -1,0 +1,87 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+Generates a volcano plot using the p-values from the Fisher's test function. Collects the files from fisher_test.Rmd. File names must be specified manually.
+
+```{r}
+library(readxl)
+library(tidyverse)
+library(ggplot2)
+library(cowplot)
+library(ggrepel)
+
+missense_0 <- read_excel("C:/Users/Daniel/OneDrive - Monash University/Documents/University/GNA5900/results/fisher_results_pathways_2.0_PLPs_only_vs_other.xlsx", sheet = 1) %>% 
+  mutate(timepoint = "Baseline", variant = "Missense")
+missense_1 <- read_excel("C:/Users/Daniel/OneDrive - Monash University/Documents/University/GNA5900/results/fisher_results_pathways_2.0_PLPs_only_vs_other.xlsx", sheet = 2) %>% 
+  mutate(timepoint = "6 week", variant = "Missense")
+truncate_0 <- read_excel("C:/Users/Daniel/OneDrive - Monash University/Documents/University/GNA5900/results/fisher_results_pathways_2.0_PLPs_only_vs_other.xlsx", sheet = 3) %>% 
+  mutate(timepoint = "Baseline", variant = "Truncating")
+truncate_1 <- read_excel("C:/Users/Daniel/OneDrive - Monash University/Documents/University/GNA5900/results/fisher_results_pathways_2.0_PLPs_only_vs_other.xlsx", sheet = 4) %>% 
+  mutate(timepoint = "6 week", variant = "Truncating")
+inframe_0 <- read_excel("C:/Users/Daniel/OneDrive - Monash University/Documents/University/GNA5900/results/fisher_results_pathways_2.0_PLPs_only_vs_other.xlsx", sheet = 5) %>% 
+  mutate(timepoint = "Baseline", variant = "In-frame indel")
+inframe_1 <- read_excel("C:/Users/Daniel/OneDrive - Monash University/Documents/University/GNA5900/results/fisher_results_pathways_2.0_PLPs_only_vs_other.xlsx", sheet = 6) %>% 
+  mutate(timepoint = "6 week", variant = "In-frame indel")
+cnv_0 <- read_excel("C:/Users/Daniel/OneDrive - Monash University/Documents/University/GNA5900/results/fisher_results_pathways_2.0_PLPs_only_vs_other.xlsx", sheet = 7) %>% 
+  mutate(timepoint = "Baseline", variant = "CNV")
+cnv_1 <- read_excel("C:/Users/Daniel/OneDrive - Monash University/Documents/University/GNA5900/results/fisher_results_pathways_2.0_PLPs_only_vs_other.xlsx", sheet = 8) %>% 
+  mutate(timepoint = "6 week", variant = "CNV")
+combined_0 <- read_excel("C:/Users/Daniel/OneDrive - Monash University/Documents/University/GNA5900/results/fisher_results_pathways_2.0_PLPs_only_vs_other.xlsx", sheet = 9) %>% 
+  mutate(timepoint = "Baseline", variant = "All variants")
+combined_1 <- read_excel("C:/Users/Daniel/OneDrive - Monash University/Documents/University/GNA5900/results/fisher_results_pathways_2.0_PLPs_only_vs_other.xlsx", sheet = 10) %>% 
+  mutate(timepoint = "6 week", variant = "All variants")
+
+
+all_data <- bind_rows(missense_0, missense_1, truncate_0, truncate_1, inframe_0, inframe_1, cnv_0, cnv_1, combined_0, combined_1)
+
+
+fisher_results <- all_data %>%
+  mutate(
+    log2_OR = log2(Odds_Ratio),
+    #neg_log10_p = -log10(P_value),
+    neg_log10_p = -log10(P_adj),
+    significance = case_when(
+      # P_value < 0.05 & Odds_Ratio > 1 ~ "Up in group",
+      # P_value < 0.05 & Odds_Ratio < 1 ~ "Down in group",
+      P_adj < 0.05 & Odds_Ratio > 1 ~ "Up in group",
+      P_adj < 0.05 & Odds_Ratio < 1 ~ "Down in group",
+      TRUE ~ "Not significant"
+    )
+  ) %>%
+  filter(is.finite(log2_OR))
+
+#top_hits <- fisher_results %>% filter(P_value < 0.05)
+top_hits <- fisher_results %>% filter(P_adj < 0.05) %>%
+  #mutate(Gene = str_replace_all(Gene, "_", " "))
+  mutate(Pathway = str_replace_all(Pathway, "_", " "))
+
+volcano <- ggplot(fisher_results, aes(x = log2_OR, y = neg_log10_p, colour = variant, shape = timepoint)) +
+  geom_point(alpha = 1.0, size = 2) +
+  geom_hline(yintercept = -log10(0.05), linetype = "dotted", colour = "red", linewidth = 1) +
+  scale_color_manual(values = c(
+    "Missense" = "#E41A1C",
+    "Truncating" = "#377EB8",
+    "In-frame indel" = "#4DAF4A",
+    "CNV" = "#984EA3",
+    "All variants" = "#FF7F00"
+  )) +
+  geom_text_repel(data = top_hits, aes(label = Pathway), size = 3) +
+  #geom_text_repel(data = top_hits, aes(label = Gene), size = 3) +
+  #geom_text(data = top_hits, aes(label = Gene), size = 3) +
+  geom_vline(xintercept = 1, linetype = "dashed", colour = "grey50") +
+  theme_cowplot() +
+  labs(
+    x = "log2(OR)",
+    y = "-log10(p-value)",
+    colour = "Variant Type",
+    shape = "Timepoint"
+  )
+
+volcano
+
+ggsave("C:/Users/Daniel/OneDrive - Monash University/Documents/University/GNA5900/figures/volcano_plot_pathways_all_patients.png", 
+       plot = volcano,
+       dpi = 600)
+```

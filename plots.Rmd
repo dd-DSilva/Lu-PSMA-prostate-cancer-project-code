@@ -1,0 +1,61 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+
+Generates a short, compiled list of SNVs in a specific gene in either ERs or PRs. Used to make a lollipop plot.
+
+```{r}
+library(dplyr)
+library(stringr)
+
+variant_data <- read_excel("C:/Users/Daniel/Documents/University/GNA5900/combined_variants.xlsx")
+CNV_data <- read_excel("C:/Users/Daniel/Documents/University/GNA5900/combined_cnvs.xlsx")
+
+
+clinical_data <- read_excel("C:/Users/Daniel/Documents/University/GNA5900/patient_list.xlsx")
+good_responders <- clinical_data %>% filter(cessation_number == 1)
+poor_responders <- clinical_data %>% filter(cessation_number == 3)
+
+variant_data <- variant_data %>%
+  mutate(base_sample = sub("^([A-Za-z]+-[0-9]{3}).*", "\\1", sample)) %>%
+  filter(!grepl("1.1", sample) & !grepl("1.2", sample) & !grepl("2.0", sample)) %>%
+  filter(variant_type == "SNV" & gene == "AR" & base_sample %in% poor_responders$PMC_ID)
+
+
+aa_3_to_1 <- c(
+  Ala = "A", Arg = "R", Asn = "N", Asp = "D", Cys = "C", 
+  Gln = "Q", Glu = "E", Gly = "G", His = "H", Ile = "I", 
+  Leu = "L", Lys = "K", Met = "M", Phe = "F", Pro = "P", 
+  Ser = "S", Thr = "T", Trp = "W", Tyr = "Y", Val = "V"
+)
+
+
+convert_to_one_letter <- function(protein_change) {
+  raw_change <- str_extract(protein_change, "[A-Z][a-z]{2}[0-9]+[A-Z][a-z]{2}")
+  
+  if (is.na(raw_change)) return(NA)
+  
+  from_aa <- str_extract(raw_change, "^[A-Z][a-z]{2}")
+  pos <- str_extract(raw_change, "[0-9]+")
+  to_aa <- str_extract(raw_change, "[A-Z][a-z]{2}$")
+  
+  # Convert using lookup
+  if (from_aa %in% names(aa_3_to_1) && to_aa %in% names(aa_3_to_1)) {
+    return(paste0(aa_3_to_1[from_aa], pos, aa_3_to_1[to_aa]))
+  } else {
+    return(NA)
+  }
+}
+
+
+variant_data <- variant_data %>%
+  mutate(protein_change_short = sapply(protein_change, convert_to_one_letter))
+
+
+variant_counts <- variant_data %>%
+  count(protein_change_short, name = "count") %>%
+  rename(variant = protein_change_short)
+```
+

@@ -1,0 +1,46 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+Given a list of variants, isolates SNVs in NCOR2 and prints out the shorthand protein change for each one to be input into lolliopops.exe
+
+```{r}
+library(dplyr)
+library(readxl)
+library(writexl)
+library(stringr)
+
+variant_data <- read_excel("C:/Users/Daniel/Documents/University/GNA5900/combined_variants.xlsx")
+
+ncor_variants <- variant_data %>%
+  filter(plp == "N") %>%
+  filter(variant_type == "SNV") %>%
+  filter(gene == "NCOR2") %>%
+  count(protein_change, sort = T)
+
+# Amino acid conversion table
+aa_lookup <- c(
+  Ala = "A", Arg = "R", Asn = "N", Asp = "D", Cys = "C",
+  Gln = "Q", Glu = "E", Gly = "G", His = "H", Ile = "I",
+  Leu = "L", Lys = "K", Met = "M", Phe = "F", Pro = "P",
+  Ser = "S", Thr = "T", Trp = "W", Tyr = "Y", Val = "V",
+  Ter = "*"  # for stop codons
+)
+
+# Adjusted function to extract short HGVS notation from full transcript notation
+convert_to_short <- function(hgvs_vec) {
+  sapply(hgvs_vec, function(hgvs) {
+    parts <- str_match(hgvs, ":p\\.([A-Z][a-z]{2})([0-9]+)([A-Z][a-z]{2}|Ter)$")
+    if (any(is.na(parts))) return(NA_character_)
+    paste0(aa_lookup[parts[2]], parts[3], aa_lookup[parts[4]])
+  })
+}
+
+# Apply conversion
+ncor_variants <- ncor_variants %>%
+  mutate(short_protein_change = convert_to_short(protein_change))
+
+print(ncor_variants)
+```
+

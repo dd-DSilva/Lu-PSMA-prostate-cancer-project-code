@@ -1,0 +1,248 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+Perform K-means clustering on baseline data.
+
+```{r}
+library(factoextra)
+library(cluster)
+library(tidyr)
+library(readxl)
+
+## Collate all baseline variant data into matrix
+variant_data <- read_excel("C:/Users/Daniel/Documents/University/GNA5900/combined_variants.xlsx")
+#variant_data <- read_excel("C:/Users/Daniel/Documents/University/GNA5900/clonal_variants.xlsx")
+CNV_data <- read_excel("C:/Users/Daniel/Documents/University/GNA5900/combined_cnvs.xlsx")
+
+combined_variants <- bind_rows(variant_data, CNV_data) %>%
+  filter(!grepl("1\\.1|1\\.2|1\\.3|2\\.0|-1-1", sample)) %>%
+  mutate(sample = sub("^([A-Za-z]+-[0-9]{3}).*", "\\1", sample)) %>%
+  filter(plp == "Y") #%>%
+  #filter(is_clonal == T)
+  
+variant_count <- combined_variants %>%
+  group_by(gene, sample) %>%
+  summarise(VariantCount = n(),.groups = "drop")
+
+variant_matrix_kmeans <- variant_count %>%
+  pivot_wider(
+    names_from = sample,
+    values_from = VariantCount,
+    values_fill = 0
+  )
+
+variant_matrix_kmeans <- as.matrix(variant_matrix_kmeans[ , -1])
+rownames(variant_matrix_kmeans) <- variant_count %>% distinct(gene) %>% pull(gene)
+
+variant_matrix_kmeans <- t(variant_matrix_kmeans) %>%
+  na.omit() %>%
+  scale()
+
+#variant_matrix_kmeans <- as.matrix(variant_matrix_kmeans[ , -1]) # Exclude column of gene names
+
+## Identify most ideal number of clusters
+# Outputs scree plot
+fviz_nbclust(variant_matrix_kmeans, kmeans, method = "wss")
+
+# Computes gap statistic
+gap_stat <- clusGap(variant_matrix_kmeans,
+                    FUN = kmeans,
+                    nstart = 25,
+                    K.max = 10,
+                    B = 50)
+fviz_gap_stat(gap_stat)
+
+# Employs silhouette method
+fviz_nbclust(variant_matrix_kmeans, kmeans, method = "silhouette")
+
+## Perform K-means clustering
+km <- kmeans(variant_matrix_kmeans, centers = 2, nstart = 25)
+km
+km_data <- fviz_cluster(km, data = variant_matrix_kmeans, labelsize = 0, return.data = TRUE)
+km_data
+
+## Plot clusters and response groups
+pca <- prcomp(variant_matrix_kmeans, scale. = TRUE)
+pca_coords <- as.data.frame(pca$x[, 1:2])
+
+# Add sample IDs and cluster info
+pca_coords$PMC_ID <- rownames(variant_matrix_kmeans)
+pca_coords$cluster <- factor(km$cluster)
+
+clinical_data <- read_excel("C:/Users/Daniel/Documents/University/GNA5900/patient_list.xlsx", sheet = 1)
+
+# Convert and trim ID columns to avoid merge issues
+pca_coords$PMC_ID <- trimws(as.character(pca_coords$PMC_ID))
+clinical_data$PMC_ID <- trimws(as.character(clinical_data$PMC_ID))
+
+# Merge
+plot_data <- left_join(pca_coords, clinical_data, by = "PMC_ID")
+
+my_colors <- c(
+  "1" = "#1f77b4",
+  "2" = "#FFD700",
+  "3" = "#d62728"
+)
+
+ggplot(plot_data, aes(x = PC1, y = PC2, color = as.factor(cessation_number), shape = cluster)) +
+  geom_point(size = 3) +
+  scale_colour_manual(values = my_colors) +
+  labs(title = "PCA of Patients by Cluster and Clinical Response") +
+  theme_minimal()
+```
+
+The optimal number of clusters for this data set is 2. 2 clusters fails to generate useful structure in the data, but more clusters results in overfitting.
+
+
+Perform K-means clustering on all data across all timepoints.
+
+```{r}
+library(factoextra)
+library(cluster)
+library(tidyr)
+library(readxl)
+library(cowplot)
+
+## Collate all baseline variant data into matrix
+# Filter out subclonal variants
+#variant_data <- read_excel("C:/Users/Daniel/Documents/University/GNA5900/combined_variants.xlsx")
+variant_data <- read_excel("C:/Users/Daniel/Documents/University/GNA5900/clonal_variants.xlsx")
+CNV_data <- read_excel("C:/Users/Daniel/Documents/University/GNA5900/combined_cnvs.xlsx")
+
+combined_variants_prog <- bind_rows(variant_data, CNV_data) %>%
+  mutate(
+    PMC_ID = sub("^([A-Za-z]+-[0-9]{3}).*", "\\1", sample),
+    timepoint = case_when(
+      grepl("1\\.1|\\-1\\-1", sample) ~ "1.1",
+      grepl("1\\.2", sample) ~ "1.2",
+      grepl("1\\.3|2\\.0", sample) ~ "2.0",
+      TRUE ~ "1.0"
+    ),
+    sample_id = paste0(PMC_ID, "_", timepoint)  # New unique ID for each sample+timepoint
+  ) %>%
+  mutate(sample = sub("^([A-Za-z]+-[0-9]{3}).*", "\\1", sample)) %>%
+  filter(plp == "Y") %>%
+  filter(is_clonal == T)
+  
+variant_count_prog <- combined_variants_prog %>%
+  group_by(gene, sample_id) %>%
+  summarise(VariantCount = n(), .groups = "drop")
+
+variant_matrix_kmeans_prog <- variant_count_prog %>%
+  pivot_wider(
+    names_from = sample_id,
+    values_from = VariantCount,
+    values_fill = 0
+  )
+
+variant_matrix_kmeans_prog <- as.matrix(variant_matrix_kmeans_prog[ , -1])
+rownames(variant_matrix_kmeans_prog) <- variant_count_prog %>% distinct(gene) %>% pull(gene)
+
+variant_matrix_kmeans_prog <- t(variant_matrix_kmeans_prog) %>%
+  na.omit() %>%
+  scale()
+
+
+## Identify most ideal number of clusters
+# Outputs scree plot
+fviz_nbclust(variant_matrix_kmeans_prog, kmeans, method = "wss")
+
+# Gap statistic
+gap_stat <- clusGap(variant_matrix_kmeans_prog,
+                    FUN = kmeans,
+                    nstart = 25,
+                    K.max = 10,
+                    B = 50)
+fviz_gap_stat(gap_stat)
+
+# Silhouette method
+fviz_nbclust(variant_matrix_kmeans_prog, kmeans, method = "silhouette")
+
+## Perform K-means clustering
+km <- kmeans(variant_matrix_kmeans_prog, centers = 4, nstart = 25)
+km
+km_data <- fviz_cluster(km, data = variant_matrix_kmeans_prog, labelsize = 0, return.data = TRUE)
+km_data
+
+## Plot clusters and response groups
+pca <- prcomp(variant_matrix_kmeans_prog, scale. = TRUE)
+pca_coords <- as.data.frame(pca$x[, 1:2])
+pca_coords$sample_id <- rownames(variant_matrix_kmeans_prog)
+pca_coords$PMC_ID <- rownames(variant_matrix_kmeans_prog)
+pca_coords$cluster <- factor(km$cluster)
+pca_coords <- pca_coords %>%
+  mutate(
+    PMC_ID = sub("^(.*)_.*$", "\\1", sample_id),
+    timepoint = sub("^.*_(.*)$", "\\1", sample_id),
+    cluster = factor(km$cluster)
+  )
+
+clinical_data <- read_excel("C:/Users/Daniel/Documents/University/GNA5900/patient_list.xlsx", sheet = 1)
+
+pca_coords$PMC_ID <- trimws(as.character(pca_coords$PMC_ID))
+clinical_data$PMC_ID <- trimws(as.character(clinical_data$PMC_ID))
+
+plot_data <- left_join(pca_coords, clinical_data, by = "PMC_ID")
+
+my_colors <- c(
+  "1" = "#1f77b4",
+  "2" = "#FFD700",
+  "3" = "#d62728"
+)
+
+metadata <- combined_variants_prog %>%
+  distinct(PMC_ID, timepoint)
+
+plot_data <- left_join(pca_coords, clinical_data, by = "PMC_ID")
+
+ggplot(plot_data, aes(x = PC1, y = PC2, color = as.factor(cessation_number), shape = cluster)) +
+  geom_point(size = 2) +
+  facet_wrap(~ timepoint) +
+  scale_colour_manual(values = my_colors) +
+  labs(title = "PCA of patients by cluster and response over time") +
+  theme_cowplot()
+```
+
+```{r}
+cluster_1_data <- plot_data %>% filter(cluster == 2 | cluster == 4)
+
+ggplot(cluster_1_data, aes(x = PC1, y = PC2, color = as.factor(cessation_number))) +
+  geom_point(size = 2) +
+  facet_wrap(~ cluster) +
+  scale_colour_manual(values = my_colors) +
+  labs(title = "Clusters 2 and 4") +
+  theme_cowplot()
+
+samples_cluster_2 <- plot_data %>% filter(cluster == 2) %>% pull(sample_id)
+samples_cluster_4 <- plot_data %>% filter(cluster == 4) %>% pull(sample_id)
+
+# Subset matrix for each cluster
+matrix_cluster_2 <- variant_matrix_kmeans_prog[rownames(variant_matrix_kmeans_prog) %in% samples_cluster_2, ]
+matrix_cluster_4 <- variant_matrix_kmeans_prog[rownames(variant_matrix_kmeans_prog) %in% samples_cluster_4, ]
+
+# Compute means for each gene
+mean_2 <- colMeans(matrix_cluster_2)
+mean_4 <- colMeans(matrix_cluster_4)
+
+# Difference in means
+mean_diff <- mean_2 - mean_4
+
+# Create a dataframe of differences
+gene_diff_df <- data.frame(
+  gene = colnames(matrix_cluster_1),
+  mean_cluster_2 = mean_2,
+  mean_cluster_4 = mean_4,
+  difference = mean_diff
+)
+
+# Sort by absolute difference
+top_diff_genes <- gene_diff_df %>%
+  arrange(desc(abs(difference))) %>%
+  head(20)
+
+print(top_diff_genes)
+```
+
+3 or 4 clusters is optimal for this dataset

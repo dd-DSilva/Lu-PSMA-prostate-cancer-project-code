@@ -1,0 +1,921 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+Load libraries and data file, then separate out different types of variants by protein impact.
+
+```{r}
+library(readxl)
+library(openxlsx)
+library(dplyr)
+library(writexl)
+library(tidyr)
+library(purrr)
+
+variant_data <- read_excel("C:/Users/Daniel/OneDrive - Monash University/Documents/University/GNA5900/combined_variants.xlsx")
+CNV_data <- read_excel("C:/Users/Daniel/OneDrive - Monash University/Documents/University/GNA5900/combined_cnvs.xlsx")
+
+missense_data <- variant_data %>% filter((variant_type == "SNV" | variant_type == "Complex") &
+                                           !grepl("Ter", protein_change) &
+                                           !grepl("=", protein_change) &
+                                           !grepl("\\+", coding_change) &
+                                           !grepl("\\-", coding_change))
+synonymous_data <- variant_data %>% filter((variant_type == "SNV" | variant_type == "Complex") & grepl("=", protein_change))
+inframe_data <- variant_data %>% filter((variant_type == "SNV" | variant_type == "Complex") & !grepl("\\*", protein_change))
+truncate_data <- variant_data %>% filter(grepl("\\*", protein_change) | grepl("Ter", protein_change))
+intronic_data <- variant_data %>% filter(grepl("\\+", coding_change) | grepl("\\-", coding_change))
+combined_data <- bind_rows(variant_data, CNV_data)
+```
+
+This code collects the number of times SNVs occur in a specific gene in a specific population, and then performs Fisher's exact test. Data is saved to an Excel file in GNA5900/results/.
+
+```{r}
+run_fishers_test <- function(data, 
+                             plp_filter = FALSE, 
+                             sample_filter = "1.0", 
+                             data_label = "unknown",
+                             comparison_group = "other")
+{
+  clinical_data <- read_excel("C:/Users/Daniel/OneDrive - Monash University/Documents/University/GNA5900/clinical_data.xlsx")
+  good_responders <- clinical_data %>% filter(`Reason for cessation (numbered)` == 1)
+  poor_responders <- clinical_data %>% filter(`Reason for cessation (numbered)` == 3)
+  other_responders <- clinical_data %>% filter(`Reason for cessation (numbered)` != 1)
+  
+  # Determine which comparison group to use:
+  if (comparison_group == "poor") {
+    compare_responders <- poor_responders
+  } else if (comparison_group == "other") {
+    compare_responders <- other_responders
+  } else {
+    stop("Invalid comparison_group. Choose 'poor' or 'other'.")
+  }
+  
+  # Remove number of patients with low ctDNA
+  if (identical(data, CNV_data) | identical(data, combined_data)) {
+    if (sample_filter == "1.0") {
+      total_ER <- nrow(good_responders) - 19
+      total_PR <- nrow(compare_responders) - ifelse(comparison_group == "poor", 31, 67)
+    }
+    else {
+      total_ER <- nrow(good_responders) - 22
+      total_PR <- nrow(compare_responders) - ifelse(comparison_group == "poor", 3, 11)
+    }
+  }
+  else {
+    if (sample_filter == "1.0") {
+      total_ER <- nrow(good_responders) - 3
+      total_PR <- nrow(compare_responders) - ifelse(comparison_group == "poor", 1, 5)
+    }
+    else {
+      total_ER <- nrow(good_responders) - 5
+      total_PR <- nrow(compare_responders) - ifelse(comparison_group == "poor", 3, 11)
+    }
+  }
+  
+  filtered_data <- data
+  
+  if (plp_filter) {
+    filtered_data <- filtered_data %>% filter(plp != "N")
+  }
+  
+  if (sample_filter == "1.0") {
+    filtered_data <- filtered_data %>% filter(!grepl("1\\.1|1\\.2|2\\.0|-1-1", sample))
+  } else {
+    filtered_data <- filtered_data %>% filter(grepl("1\\.1", sample) | grepl("\\-1\\-1", sample))
+  }
+  
+  filtered_data <- filtered_data %>%
+    mutate(base_sample = sub("^([A-Za-z]+-[0-9]{3}).*", "\\1", sample))
+  
+  dedup_data <- filtered_data %>%
+    distinct(base_sample, gene)
+  
+  # Exclude samples we cannot call variants from due to low ctDNA
+  if (identical(data, CNV_data) | identical(data, combined_data)) {
+    if (sample_filter == "1.0") {
+      excluded_samples <- clinical_data %>%
+        filter(`ctDNA fraction_1.0` < 0.2) %>%
+        pull(PMC_ID)
+    }
+    else {
+      excluded_samples <- clinical_data %>%
+        filter(`ctDNA fraction_1.1` < 0.2) %>%
+        pull(PMC_ID)
+    }
+  }
+  else {
+    if (sample_filter == "1.0") {
+      excluded_samples <- clinical_data %>%
+        filter(`ctDNA fraction_1.0` == 0) %>%
+        pull(PMC_ID)
+    }
+    else {
+      excluded_samples <- clinical_data %>%
+        filter(`ctDNA fraction_1.1` == 0) %>%
+        pull(PMC_ID)
+    }
+  }
+  
+  dedup_data <- dedup_data %>%
+    filter(!base_sample %in% excluded_samples)
+  
+  # Build PLP sets based on chosen comparison group
+  PLP_ER <- dedup_data %>% filter(base_sample %in% good_responders$PMC_ID)
+  PLP_PR <- dedup_data %>% filter(base_sample %in% compare_responders$PMC_ID)
+  
+  # All genes and samples union from ER and the comparison group
+  all_genes <- union(PLP_ER$gene, PLP_PR$gene)
+  all_samples <- union(good_responders$PMC_ID, compare_responders$PMC_ID)
+  
+  all_base_samples <- setdiff(all_samples, excluded_samples)
+  
+  # Variant matrix construction, with responder labels
+  variant_matrix <- expand.grid(base_sample = all_base_samples, gene = unique(dedup_data$gene)) %>%
+    left_join(dedup_data %>% mutate(present = 1), by = c("base_sample", "gene")) %>%
+    mutate(present = ifelse(is.na(present), 0, present)) %>%
+    pivot_wider(names_from = gene, values_from = present) %>%
+    mutate(responder = case_when(
+      base_sample %in% good_responders$PMC_ID ~ "ER",
+      base_sample %in% compare_responders$PMC_ID ~ "PR"
+    )) %>%
+    filter(!is.na(responder))
+  
+  # Count how many times each gene appears in ERs, including zeros
+  all_genes <- unique(dedup_data$gene)
+  
+  gene_order_df <- data.frame(gene = all_genes) %>%
+    left_join(
+      PLP_ER %>% count(gene, name = "ER_total_count"),
+      by = "gene"
+    ) %>%
+    mutate(ER_total_count = ifelse(is.na(ER_total_count), 0, ER_total_count)) %>%
+    arrange(desc(ER_total_count))
+  
+  # Preserve this order
+  gene_columns <- gene_order_df$gene
+  
+  # List to collect results
+  results_list <- list()
+  
+  # Loop through genes
+  for (gene in gene_columns) {
+    gene_data <- variant_matrix %>% select(!!gene, responder)
+    contingency_table <- table(gene_data[[gene]], gene_data$responder)
+  
+    # Ensure all levels exist
+    if (!("ER" %in% colnames(contingency_table))) {
+      contingency_table <- cbind(contingency_table, ER = c(0, 0))
+    }
+    if (!("PR" %in% colnames(contingency_table))) {
+      contingency_table <- cbind(contingency_table, PR = c(0, 0))
+    }
+    if (nrow(contingency_table) == 1) {
+      contingency_table <- rbind(contingency_table, c(0, 0))
+      rownames(contingency_table) <- c("0", "1")
+    }
+  
+    # Fisher's exact test
+    fisher_result <- fisher.test(contingency_table)
+  
+    # Extract counts
+    count_ER_with <- contingency_table["1", "ER"]
+    count_ER_without <- contingency_table["0", "ER"]
+    count_PR_with <- contingency_table["1", "PR"]
+    count_PR_without <- contingency_table["0", "PR"]
+  
+    # Percentages
+    percent_ER_with <- 100 * count_ER_with / total_ER
+    percent_PR_with <- 100 * count_PR_with / total_PR
+  
+    # Odds ratio and CI (may return NA if not computable)
+    or <- fisher_result$estimate
+    
+    # Apply pseudocount
+    a <- count_ER_with
+    b <- count_ER_without
+    c <- count_PR_with
+    d <- count_PR_without
+    
+    or_pseudo <- ((a + 0.5) * (d + 0.5)) / ((b + 0.5) * (c + 0.5))
+
+    ci_lower <- fisher_result$conf.int[1]
+    ci_upper <- fisher_result$conf.int[2]
+  
+    # Calculate RR with a pseudocount to avoid division by zero
+    rr_num <- count_ER_with / (count_ER_with + count_ER_without)
+    rr_den <- count_PR_with / (count_PR_with + count_PR_without)
+    
+    rr <- if ((count_ER_with + count_ER_without > 0) && (count_PR_with + count_PR_without > 0)) {
+      rr_num / rr_den
+    } else {
+      NA
+    }
+    
+    # Store as row in results list
+    results_list[[gene]] <- data.frame(
+      Gene = gene,
+      ER_with = count_ER_with,
+      ER_without = count_ER_without,
+      ER_with_percent = percent_ER_with,
+      PR_with = count_PR_with,
+      PR_without = count_PR_without,
+      PR_with_percent = percent_PR_with,
+      Odds_Ratio = round(or_pseudo, 2),
+      OR_true = round(unname(or), 2),
+      #Odds_Ratio = round(unname(or), 2),
+      CI_Lower = round(ci_lower, 2),
+      CI_Upper = round(ci_upper, 2),
+      Relative_Risk = round(rr, 2),
+      P_value = fisher_result$p.value
+    )
+  }
+  
+  # Combine all results
+  fisher_results_df <- do.call(rbind, results_list)
+  
+  fisher_results_df <- fisher_results_df %>%
+    mutate(P_adj = p.adjust(fisher_results_df$P_value, method = "BH"))
+}
+
+## Run loop
+data_list <- list(
+  missense = missense_data,
+  truncate = truncate_data,
+  inframe = inframe_data,
+  CNV = CNV_data,
+  combined = combined_data
+)
+
+comparison_groups <- c("poor", "other")
+
+for (plp_filter in c(FALSE, TRUE)) {
+  for (comparison_group in comparison_groups) {
+    results_by_sheet <- list()
+    
+    for (data_label in names(data_list)) {
+      for (sample_filter in c("1.0", "1.1")) {
+        sheet_name <- paste0(data_label, "_", sample_filter, "_", comparison_group)
+        
+        results_df <- run_fishers_test(data = data_list[[data_label]],
+                                       plp_filter = plp_filter,
+                                       sample_filter = sample_filter,
+                                       data_label = data_label,
+                                       comparison_group = comparison_group)
+        
+        results_by_sheet[[sheet_name]] <- results_df
+      }
+    }
+    
+    output_file <- paste0("C:/Users/Daniel/OneDrive - Monash University/Documents/University/GNA5900/results/fisher_results_2.0_",
+                          ifelse(plp_filter, "PLPs_only", "All_variants"),
+                          "_vs_", comparison_group,
+                          ".xlsx")
+    
+    write.xlsx(results_by_sheet, file = output_file, asTable = TRUE)
+  }
+}
+```
+
+
+Similar to above, but this code examines all the genes of a specific type together. Data is saved to an Excel file in GNA5900/results/.
+
+```{r}
+library(tidyverse)
+library(dplyr)
+library(survival)
+library(survminer)
+library(readxl)
+library(openxlsx)  # for write.xlsx
+
+# 1.1 Read the “variant_classes.xlsx” file into a long‐format mapping:
+gene_types_raw <- read_excel(
+  "C:/Users/Daniel/OneDrive - Monash University/Documents/University/GNA5900/variant_classes.xlsx"
+)
+
+# Each column in variant_classes.xlsx` is a pathway (gene_type),
+# and each cell contains a gene name (or NA).
+gene_type_map <- gene_types_raw %>%
+  pivot_longer(
+    cols      = everything(),
+    names_to  = "pathway",      # e.g. “DNA_Repair”, “Cell_Cycle”, etc.
+    values_to = "gene"
+  ) %>%
+  filter(!is.na(gene))         # remove any NA cells
+
+
+run_fishers_test <- function(data,
+                             plp_filter       = FALSE,
+                             sample_filter    = "1.0",
+                             data_label       = "unknown",
+                             comparison_group = "other")
+{
+  # 3.1 Load clinical data inside the function (same as before)
+  clinical_data   <- read_excel(
+    "C:/Users/Daniel/OneDrive - Monash University/Documents/University/GNA5900/clinical_data.xlsx"
+  )
+  good_responders <- clinical_data %>%
+    filter(`Reason for cessation (numbered)` == 1)
+  poor_responders <- clinical_data %>%
+    filter(`Reason for cessation (numbered)` == 3)
+  other_responders <- clinical_data %>%
+    filter(`Reason for cessation (numbered)` != 1)
+
+  # 3.2 Choose the comparison set based on argument:
+  if (comparison_group == "poor") {
+    compare_responders <- poor_responders
+  } else if (comparison_group == "other") {
+    compare_responders <- other_responders
+  } else {
+    stop("Invalid comparison_group. Choose 'poor' or 'other'.")
+  }
+
+  # 3.3 Adjust totals to exclude low‐ctDNA patients (same logic as before)
+  if (identical(data, CNV_data) | identical(data, combined_data)) {
+    if (sample_filter == "1.0") {
+      total_ER <- nrow(good_responders) - 19
+      total_PR <- nrow(compare_responders) - ifelse(comparison_group == "poor", 31, 67)
+    } else {
+      total_ER <- nrow(good_responders) - 22
+      total_PR <- nrow(compare_responders) - ifelse(comparison_group == "poor", 3, 11)
+    }
+  } else {
+    if (sample_filter == "1.0") {
+      total_ER <- nrow(good_responders) - 3
+      total_PR <- nrow(compare_responders) - ifelse(comparison_group == "poor", 1, 5)
+    } else {
+      total_ER <- nrow(good_responders) - 5
+      total_PR <- nrow(compare_responders) - ifelse(comparison_group == "poor", 3, 11)
+    }
+  }
+
+  # 3.4 Apply any PLP‐only filtering (optional)
+  filtered_data <- data
+  if (plp_filter) {
+    filtered_data <- filtered_data %>% filter(plp != "N")
+  }
+
+  # 3.5 Subset according to sample_filter
+  if (sample_filter == "1.0") {
+    filtered_data <- filtered_data %>%
+      filter(!grepl("1\\.1|1\\.2|2\\.0|-1-1", sample))
+  } else {
+    filtered_data <- filtered_data %>%
+      filter(grepl("1\\.1", sample) | grepl("\\-1\\-1", sample))
+  }
+
+  # 3.6 Create a “base_sample” column (unique patient ID)
+  filtered_data <- filtered_data %>%
+    mutate(base_sample = sub("^([A-Za-z]+-[0-9]{3}).*", "\\1", sample))
+
+  # 3.7 Deduplicate at the variant‐level (sample–gene unique rows)
+  dedup_data <- filtered_data %>%
+    distinct(base_sample, gene)
+
+  # 3.8 Exclude patients with low ctDNA that can’t call CNVs/variants
+  if (identical(data, CNV_data) | identical(data, combined_data)) {
+    if (sample_filter == "1.0") {
+      excluded_samples <- clinical_data %>%
+        filter(`ctDNA fraction_1.0` < 0.2) %>%
+        pull(PMC_ID)
+    } else {
+      excluded_samples <- clinical_data %>%
+        filter(`ctDNA fraction_1.1` < 0.2) %>%
+        pull(PMC_ID)
+    }
+  } else {
+    if (sample_filter == "1.0") {
+      excluded_samples <- clinical_data %>%
+        filter(`ctDNA fraction_1.0` == 0) %>%
+        pull(PMC_ID)
+    } else {
+      excluded_samples <- clinical_data %>%
+        filter(`ctDNA fraction_1.1` == 0) %>%
+        pull(PMC_ID)
+    }
+  }
+
+  dedup_data <- dedup_data %>%
+    filter(!base_sample %in% excluded_samples)
+
+  # 3.9 Map each (sample, gene) ➔ pathway(s) via gene_type_map
+  #      (A gene can appear in multiple columns; pivot_longer captured that.)
+  #    Join so that we get rows: (base_sample, gene, pathway)
+  dedup_pathway <- dedup_data %>%
+    inner_join(gene_type_map, by = "gene")
+  # Now dedup_pathway has columns: base_sample | gene | pathway
+
+  # 3.10 Now collapse to (sample × pathway) presence/absence:
+  #       If any gene in “BRCA1, ATM, …” is present for patient X, then X has that pathway = 1.
+  dedup_pathway <- dedup_pathway %>%
+    distinct(base_sample, pathway) %>%
+    mutate(present = 1)
+
+  # 3.11 Identify your early/responder sets
+  PLP_ER <- dedup_pathway %>%
+    filter(base_sample %in% good_responders$PMC_ID)
+  PLP_PR <- dedup_pathway %>%
+    filter(base_sample %in% compare_responders$PMC_ID)
+
+  # 3.12 List of all pathways you’ll test:
+  all_pathways <- unique(gene_type_map$pathway)
+
+  # 3.13 List of all relevant samples (excluding those we can’t call variants for):
+  all_samples <- union(good_responders$PMC_ID, compare_responders$PMC_ID)
+  all_base_samples <- setdiff(all_samples, excluded_samples)
+
+  # 3.14 Build a “variant_matrix” with one column per pathway:
+  #   - Each row is one patient (base_sample). 
+  #   - Value = 1 if any gene in that pathway was present, 0 otherwise.
+  variant_matrix <- expand.grid(
+    base_sample = all_base_samples,
+    pathway     = all_pathways,
+    stringsAsFactors = FALSE
+  ) %>%
+    left_join(dedup_pathway %>% select(base_sample, pathway, present),
+              by = c("base_sample", "pathway")) %>%
+    mutate(present = ifelse(is.na(present), 0, present)) %>%
+    pivot_wider(
+      names_from   = pathway,
+      values_from  = present
+    ) %>%
+    # Add a responder column (ER vs PR)
+    mutate(responder = case_when(
+      base_sample %in% good_responders$PMC_ID   ~ "ER",
+      base_sample %in% compare_responders$PMC_ID ~ "PR",
+      TRUE                                       ~ NA_character_
+    )) %>%
+    filter(!is.na(responder))
+
+  # 3.15 Order pathways by how frequently they appear in ER (optional):
+  pathway_order_df <- PLP_ER %>%
+    count(pathway, name = "ER_total_count") %>%
+    right_join(data.frame(pathway = all_pathways), by = "pathway") %>%
+    mutate(ER_total_count = ifelse(is.na(ER_total_count), 0, ER_total_count)) %>%
+    arrange(desc(ER_total_count))
+
+  pathway_columns <- pathway_order_df$pathway
+
+  # 3.16 Loop through each pathway and do Fisher’s test
+  results_list <- vector("list", length(pathway_columns))
+  names(results_list) <- pathway_columns
+
+  for (pw in pathway_columns) {
+    # 3.16.1 Build contingency table for this pathway
+    tmp <- variant_matrix %>%
+      select(all_of(c(pw, "responder"))) %>%
+      rename(present = !!pw)
+
+    contab <- table(tmp$present, tmp$responder)
+    # Ensure rows/columns exist: rows = 0/1, cols = ER/PR
+    if (!("ER" %in% colnames(contab))) {
+      contab <- cbind(contab, ER = c(0, 0))
+    }
+    if (!("PR" %in% colnames(contab))) {
+      contab <- cbind(contab, PR = c(0, 0))
+    }
+    if (nrow(contab) == 1) {
+      # If only one row (0 or 1), add the missing row of zeros
+      contab <- rbind(contab, c(0, 0))
+      rownames(contab) <- c("0", "1")
+    }
+
+    # 3.16.2 Run Fisher’s exact test
+    fisher_res <- fisher.test(contab)
+
+    # 3.16.3 Extract counts
+    count_ER_with    <- contab["1", "ER"]
+    count_ER_without <- contab["0", "ER"]
+    count_PR_with    <- contab["1", "PR"]
+    count_PR_without <- contab["0", "PR"]
+
+    # 3.16.4 Percentages
+    pct_ER_with <- 100 * count_ER_with / total_ER
+    pct_PR_with <- 100 * count_PR_with / total_PR
+
+    # 3.16.5 Odds ratio & CI
+    or       <- fisher_res$estimate
+    # Apply pseudocount
+    a <- count_ER_with
+    b <- count_ER_without
+    c <- count_PR_with
+    d <- count_PR_without
+    
+    or_pseudo <- ((a + 0.5) * (d + 0.5)) / ((b + 0.5) * (c + 0.5))
+    ci_lower <- fisher_res$conf.int[1]
+    ci_upper <- fisher_res$conf.int[2]
+
+    # 3.16.6 Relative risk (with a pseudocount if needed)
+    rr_num <- count_ER_with / (count_ER_with + count_ER_without)
+    rr_den <- count_PR_with / (count_PR_with + count_PR_without)
+    rr <- if ((count_ER_with + count_ER_without > 0) &&
+              (count_PR_with + count_PR_without > 0)) {
+      rr_num / rr_den
+    } else {
+      NA_real_
+    }
+
+    # 3.16.7 Store a row for this pathway (no adjustment yet)
+    results_list[[pw]] <- data.frame(
+      Pathway           = pw,
+      ER_with           = count_ER_with,
+      ER_without        = count_ER_without,
+      ER_with_percent   = round(pct_ER_with, 2),
+      PR_with           = count_PR_with,
+      PR_without        = count_PR_without,
+      PR_with_percent   = round(pct_PR_with, 2),
+      Odds_Ratio = round(or_pseudo, 2),
+      OR_true = round(unname(or), 2),
+      #Odds_Ratio        = round(unname(or), 2),
+      CI_Lower          = round(ci_lower, 2),
+      CI_Upper          = round(ci_upper, 2),
+      Relative_Risk     = round(rr, 2),
+      P_value           = fisher_res$p.value,
+      stringsAsFactors  = FALSE
+    )
+  }
+
+  # 3.17 Combine into one data frame and apply FDR (BH) correction
+  fisher_results_df <- bind_rows(results_list)
+  fisher_results_df <- fisher_results_df %>%
+    mutate(P_adj = p.adjust(P_value, method = "BH"))
+
+  return(fisher_results_df)
+}
+
+
+## Run loop
+data_list <- list(
+  missense = missense_data,
+  truncate = truncate_data,
+  inframe = inframe_data,
+  CNV = CNV_data,
+  combined = combined_data
+)
+
+comparison_groups <- c("poor", "other")
+
+for (plp_filter in c(FALSE, TRUE)) {
+  for (comparison_group in comparison_groups) {
+    results_by_sheet <- list()
+    
+    for (data_label in names(data_list)) {
+      for (sample_filter in c("1.0", "1.1")) {
+        sheet_name <- paste0(data_label, "_", sample_filter, "_vs_", comparison_group)
+        
+        results_df <- run_fishers_test(
+          data             = data_list[[data_label]],
+          plp_filter       = plp_filter,
+          sample_filter    = sample_filter,
+          data_label       = data_label,
+          comparison_group = comparison_group
+        )
+        
+        results_by_sheet[[sheet_name]] <- results_df
+      }
+    }
+    
+    # 4.2 Write to a single Excel file with multiple sheets:
+    output_file <- paste0(
+      "C:/Users/Daniel/OneDrive - Monash University/Documents/University/GNA5900/results/",
+      "fisher_results_pathways_2.0_",
+      ifelse(plp_filter, "PLPs_only", "All_variants"),
+      "_vs_", comparison_group,
+      ".xlsx"
+    )
+    
+    write.xlsx(
+      x       = results_by_sheet,
+      file    = output_file,
+      asTable = TRUE
+    )
+  }
+}
+
+```
+
+
+Generates a summary table of the above functions' outputs.
+```{r}
+## Directory containing the files from the previous functions
+results_dir <- "C:/Users/Daniel/OneDrive - Monash University/Documents/University/GNA5900/results/"
+
+## Find all Excel files beginning with 'fisher_results'
+files_to_summarise <- list.files(
+  path = results_dir,
+  pattern = "^fisher_results_pathways_2.0.*\\.xlsx$",
+  #pattern = "^fisher_results_2.0.*\\.xlsx$",
+  full.names = TRUE
+)
+
+all_pval_tables <- list()
+
+## Converts the file name to a shorter sheet name
+make_sheet_name <- function(filename, max_length = 31) {
+  name <- tools::file_path_sans_ext(basename(filename))
+  name <- sub("^fisher_results_?", "", name)
+  name <- gsub("[^A-Za-z0-9_]", "_", name)
+  substr(name, 1, max_length)
+}
+
+## Loop through each file
+for (file in files_to_summarise) {
+  sheets <- excel_sheets(file)
+  
+  data_list <- lapply(sheets, function(sheet) {
+    df <- read_excel(file, sheet = sheet)
+    df %>%
+      select(Pathway, P_adj, ER_with) %>%
+      #select(Gene, P_adj, ER_with) %>%
+      rename(!!paste0(sheet, "_p") := P_adj,
+             !!paste0(sheet, "_ER") := ER_with)
+  })
+  names(data_list) <- sheets
+  
+  #merged_df <- Reduce(function(x, y) full_join(x, y, by = "Gene"), data_list)
+  merged_df <- Reduce(function(x, y) full_join(x, y, by = "Pathway"), data_list)
+  
+  merged_df <- merged_df %>%
+    mutate(Total_ER_mutations = rowSums(select(., ends_with("_ER")), na.rm = TRUE)) %>%
+    arrange(desc(Total_ER_mutations))
+  
+  pval_table <- merged_df %>%
+    #select(Gene, ends_with("_p"))
+    select(Pathway, ends_with("_p"))
+  
+  # Convert filename to a base sheet name only once
+  base_sheet_name <- make_sheet_name(file)
+  
+  # Check for uniqueness and truncate if needed
+  sheet_name <- base_sheet_name
+  i <- 1
+  while (sheet_name %in% names(all_pval_tables)) {
+    # Append counter and ensure name stays within 31 characters
+    suffix <- paste0("_", i)
+    sheet_name <- substr(paste0(base_sheet_name, suffix), 1, 31)
+    i <- i + 1
+  }
+
+  # Store the table
+  all_pval_tables[[sheet_name]] <- pval_table
+  
+}
+
+#output_file <- "C:/Users/Daniel/OneDrive - Monash University/Documents/University/GNA5900/results/fisher_summary/pvalue_summary_all_files.xlsx"
+output_file <- "C:/Users/Daniel/OneDrive - Monash University/Documents/University/GNA5900/results/fisher_summary/pvalue_summary_pathways_all_files.xlsx"
+write.xlsx(all_pval_tables, file = output_file)
+```
+
+
+This code examines retrieves the number of times each gene is mutated in the ERs at each timepoint.
+
+```{r}
+library(dplyr)
+library(readxl)
+library(writexl)
+
+clinical_data <- read_excel("C:/Users/Daniel/OneDrive - Monash University/Documents/University/GNA5900/patient_list.xlsx")
+good_responders <- clinical_data %>% filter(cessation_number == 1)
+poor_responders <- clinical_data %>% filter(cessation_number == 3)
+
+variant_data <- read_excel("C:/Users/Daniel/OneDrive - Monash University/Documents/University/GNA5900/combined_variants.xlsx")
+CNV_data <- read_excel("C:/Users/Daniel/OneDrive - Monash University/Documents/University/GNA5900/combined_cnvs.xlsx")
+
+combined_variants <- bind_rows(variant_data, CNV_data)
+
+
+excluded_samples <- c("PMC-061", "PMC-083", "PMC-088", "PMC-092", "PMC-100", "PMC-107", "PMC-129", "PMC-148")
+
+timepoint_track <- function(plp_filter = FALSE,
+                            pr = FALSE,
+                             data_label = "unknown")
+  {
+  
+  filtered_data <- combined_variants
+  if (plp_filter == T) {
+    filtered_data <- filtered_data %>% filter(plp != "N")
+  }
+  filtered_data <- filtered_data %>% distinct(sample, gene)
+  
+  
+  data_1_0 <- filtered_data %>%
+    filter(!grepl("1\\.1|1\\.2|1\\.3|2\\.0|-1-1", sample)) %>%
+    mutate(base_sample = sub("^([A-Za-z]+-[0-9]{3}).*", "\\1", sample)) %>% 
+    filter(!base_sample %in% excluded_samples)
+  
+  data_1_1 <- filtered_data %>%
+    filter(grepl("1\\.1", sample) | grepl("\\-1\\-1", sample)) %>%
+    mutate(base_sample = sub("^([A-Za-z]+-[0-9]{3}).*", "\\1", sample)) %>% 
+    filter(!base_sample %in% excluded_samples)
+  
+  data_1_2 <- filtered_data %>%
+    filter(grepl("1\\.2", sample)) %>%
+    mutate(base_sample = sub("^([A-Za-z]+-[0-9]{3}).*", "\\1", sample)) %>% 
+    filter(!base_sample %in% excluded_samples)
+  
+  data_2_0 <- filtered_data %>%
+    filter(grepl("2\\.0", sample) | grepl("1\\.3", sample)) %>%
+    mutate(base_sample = sub("^([A-Za-z]+-[0-9]{3}).*", "\\1", sample)) %>% 
+    filter(!base_sample %in% excluded_samples)
+  
+  if (pr == F) {
+    n_1.0 <- 22
+    n_1.1 <- 22
+    n_1.2 <- 10
+    n_2.0 <- 10
+    
+    data_1_0 <- data_1_0 %>% filter(base_sample %in% poor_responders$PMC_ID)
+    data_1_1 <- data_1_1 %>% filter(base_sample %in% poor_responders$PMC_ID)
+    data_1_2 <- data_1_2 %>% filter(base_sample %in% poor_responders$PMC_ID)
+    data_2_0 <- data_2_0 %>% filter(base_sample %in% poor_responders$PMC_ID)
+  }
+  else {
+    n_1.0 <- 76
+    n_1.1 <- 67
+    n_1.2 <- 20
+    n_2.0 <- 5
+    
+    data_1_0 <- data_1_0 %>% filter(base_sample %in% good_responders$PMC_ID)
+    data_1_1 <- data_1_1 %>% filter(base_sample %in% good_responders$PMC_ID)
+    data_1_2 <- data_1_2 %>% filter(base_sample %in% good_responders$PMC_ID)
+    data_2_0 <- data_2_0 %>% filter(base_sample %in% good_responders$PMC_ID)
+  }
+  
+  
+  count_1.0 <- data_1_0 %>% count(gene) 
+  count_1.1 <- data_1_1 %>% count(gene) 
+  count_1.2 <- data_1_2 %>% count(gene) 
+  count_2.0 <- data_2_0 %>% count(gene)
+  
+  
+  combined_counts <- count_1.0 %>%
+    rename(count_1_0 = n) %>%
+    full_join(count_1.1 %>% rename(count_1_1 = n), by = "gene") %>%
+    full_join(count_1.2 %>% rename(count_1_2 = n), by = "gene") %>%
+    full_join(count_2.0 %>% rename(count_2_0 = n), by = "gene") %>%
+    arrange(gene)
+  
+  combined_counts <- combined_counts %>%
+    mutate(
+      perc_1_0 = round(100 * count_1_0 / n_1.0, 1),
+      perc_1_1 = round(100 * count_1_1 / n_1.1, 1),
+      perc_1_2 = round(100 * count_1_2 / n_1.2, 1),
+      perc_2_0 = round(100 * count_2_0 / n_2.0, 1)
+    )
+  
+  combined_counts[is.na(combined_counts)] <- 0
+  
+  print(combined_counts[order(combined_counts$count_1_0, decreasing = T),])
+}
+
+## Run loop and store results
+for (plp_filter in c(FALSE, TRUE)) {
+  results_by_sheet <- list()
+
+  for (pr in c(FALSE, TRUE)) {
+    sheet_name <- ifelse(pr, "Good_Responders", "Poor_Responders")
+    
+    results_df <- timepoint_track(plp_filter = plp_filter, pr = pr)
+    results_by_sheet[[sheet_name]] <- results_df
+  }
+  
+  file_suffix <- ifelse(plp_filter, "_plp_filtered", "_all_variants")
+  output_file <- paste0("C:/Users/Daniel/OneDrive - Monash University/Documents/University/GNA5900/results/genes_over_time", file_suffix, ".xlsx")
+  
+  write.xlsx(results_by_sheet, file = output_file, asTable = TRUE)
+}
+```
+
+
+Does the same as above but for pathways.
+
+```{r}
+library(dplyr)
+library(readxl)
+library(writexl)
+
+clinical_data <- read_excel("C:/Users/Daniel/OneDrive - Monash University/Documents/University/GNA5900/patient_list.xlsx")
+good_responders <- clinical_data %>% filter(cessation_number == 1)
+poor_responders <- clinical_data %>% filter(cessation_number == 3)
+
+variant_data <- read_excel("C:/Users/Daniel/OneDrive - Monash University/Documents/University/GNA5900/combined_variants.xlsx")
+CNV_data <- read_excel("C:/Users/Daniel/OneDrive - Monash University/Documents/University/GNA5900/combined_cnvs.xlsx")
+
+combined_variants <- bind_rows(variant_data, CNV_data)
+
+
+excluded_samples <- c("PMC-061", "PMC-083", "PMC-088", "PMC-092", "PMC-100", "PMC-107", "PMC-129", "PMC-148")
+
+  gene_types_raw <- read_excel("C:/Users/Daniel/OneDrive - Monash University/Documents/University/GNA5900/variant_classes.xlsx")
+  gene_type_map <- gene_types_raw %>%
+    pivot_longer(
+      cols = everything(),
+      names_to = "gene_type",
+      values_to = "gene"
+    ) %>%
+    filter(!is.na(gene))
+
+timepoint_track_pathway <- function(plp_filter = FALSE,
+                            pr = FALSE,
+                             data_label = "unknown")
+  {
+  
+  
+  filtered_data <- combined_variants
+  if (plp_filter == T) {
+    filtered_data <- filtered_data %>% filter(plp != "N")
+  }
+  filtered_data <- filtered_data %>%
+  left_join(gene_type_map, by = "gene", relationship = "many-to-many") %>%
+  filter(!is.na(gene_type)) %>%
+  distinct(sample, gene_type)
+  
+
+  
+  data_1_0 <- filtered_data %>%
+    filter(!grepl("1\\.1|1\\.2|1\\.3|2\\.0|-1-1", sample)) %>%
+    mutate(base_sample = sub("^([A-Za-z]+-[0-9]{3}).*", "\\1", sample)) %>% 
+    filter(!base_sample %in% excluded_samples)
+  
+  data_1_1 <- filtered_data %>%
+    filter(grepl("1\\.1", sample) | grepl("\\-1\\-1", sample)) %>%
+    mutate(base_sample = sub("^([A-Za-z]+-[0-9]{3}).*", "\\1", sample)) %>% 
+    filter(!base_sample %in% excluded_samples)
+  
+  data_1_2 <- filtered_data %>%
+    filter(grepl("1\\.2", sample)) %>%
+    mutate(base_sample = sub("^([A-Za-z]+-[0-9]{3}).*", "\\1", sample)) %>% 
+    filter(!base_sample %in% excluded_samples)
+  
+  data_2_0 <- filtered_data %>%
+    filter(grepl("2\\.0", sample) | grepl("1\\.3", sample)) %>%
+    mutate(base_sample = sub("^([A-Za-z]+-[0-9]{3}).*", "\\1", sample)) %>% 
+    filter(!base_sample %in% excluded_samples)
+  
+  if (pr == F) {
+    n_1.0 <- 22
+    n_1.1 <- 22
+    n_1.2 <- 10
+    n_2.0 <- 10
+    
+    data_1_0 <- data_1_0 %>% filter(base_sample %in% poor_responders$PMC_ID)
+    data_1_1 <- data_1_1 %>% filter(base_sample %in% poor_responders$PMC_ID)
+    data_1_2 <- data_1_2 %>% filter(base_sample %in% poor_responders$PMC_ID)
+    data_2_0 <- data_2_0 %>% filter(base_sample %in% poor_responders$PMC_ID)
+  }
+  else {
+    n_1.0 <- 76
+    n_1.1 <- 67
+    n_1.2 <- 20
+    n_2.0 <- 5
+    
+    data_1_0 <- data_1_0 %>% filter(base_sample %in% good_responders$PMC_ID)
+    data_1_1 <- data_1_1 %>% filter(base_sample %in% good_responders$PMC_ID)
+    data_1_2 <- data_1_2 %>% filter(base_sample %in% good_responders$PMC_ID)
+    data_2_0 <- data_2_0 %>% filter(base_sample %in% good_responders$PMC_ID)
+  }
+  
+  
+  count_1.0 <- data_1_0 %>% count(gene_type) 
+  count_1.1 <- data_1_1 %>% count(gene_type) 
+  count_1.2 <- data_1_2 %>% count(gene_type) 
+  count_2.0 <- data_2_0 %>% count(gene_type)
+  
+  
+  combined_counts <- count_1.0 %>%
+    rename(count_1_0 = n) %>%
+    full_join(count_1.1 %>% rename(count_1_1 = n), by = "gene_type") %>%
+    full_join(count_1.2 %>% rename(count_1_2 = n), by = "gene_type") %>%
+    full_join(count_2.0 %>% rename(count_2_0 = n), by = "gene_type") %>%
+    arrange(gene_type)
+  
+  combined_counts <- combined_counts %>%
+    mutate(
+      perc_1_0 = round(100 * count_1_0 / n_1.0, 1),
+      perc_1_1 = round(100 * count_1_1 / n_1.1, 1),
+      perc_1_2 = round(100 * count_1_2 / n_1.2, 1),
+      perc_2_0 = round(100 * count_2_0 / n_2.0, 1)
+    )
+  
+  combined_counts[is.na(combined_counts)] <- 0
+  
+  print(combined_counts[order(combined_counts$count_1_0, decreasing = T),])
+}
+
+## Run loop and store results
+for (plp_filter in c(FALSE, TRUE)) {
+  results_by_sheet <- list()
+
+  for (pr in c(FALSE, TRUE)) {
+    sheet_name <- ifelse(pr, "Good_Responders", "Poor_Responders")
+    
+    results_df <- timepoint_track_pathway(plp_filter = plp_filter, pr = pr)
+    results_by_sheet[[sheet_name]] <- results_df
+  }
+  
+  file_suffix <- ifelse(plp_filter, "_plp_filtered", "_all_variants")
+  output_file <- paste0("C:/Users/Daniel/OneDrive - Monash University/Documents/University/GNA5900/results/pathways_over_time", file_suffix, ".xlsx")
+  
+  write.xlsx(results_by_sheet, file = output_file, asTable = TRUE)
+}
+```

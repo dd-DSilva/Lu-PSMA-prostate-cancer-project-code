@@ -1,0 +1,509 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+Makes a waterfall plot using GenVisR.
+```{r}
+library(data.table)
+# Define the mutation hierarchy with associated colors
+my_mutation_hierarchy <- data.table(
+  mutation = c(
+    "nonsense",
+    "frameshift",
+    "splice_region",
+    "inframe_deletion",
+    "inframe_insertion",
+    "missense",
+    "intergenic_SNV",
+    "copy_loss",
+    "copy_gain",
+    "synonymous",
+    "NA"
+  ),
+  color = c(
+    "#E41A1C",  # nonsense – red
+    "#377EB8",  # frameshift – blue
+    "#4DAF4A",  # splice_region – green
+    "#984EA3",  # inframe_deletion – purple
+    "#A65628",  # inframe_insertion – brown
+    "#FF7F00",  # missense – orange
+    "#FFD92F",  # intergenic_SNV - yellow
+    "#999999",  # copy_loss – grey
+    "#F781BF",  # copy_gain – pink
+    "#66C2A5",  # synonymous – teal
+    "#CCCCCC"   # NA
+  )
+)
+
+my_mutation_hierarchy <- as.data.frame(my_mutation_hierarchy)
+```
+
+```{r}
+library(readxl)
+library(dplyr)
+library(GenVisR)
+
+## Clinical data
+clinical_data <- read_excel("C:/Users/Daniel/OneDrive - Monash University/Documents/University/GNA5900/clinical_data.xlsx")
+clinical_data_print <- clinical_data %>%
+  select("PMC_ID", "Reason for cessation (numbered)") %>%
+  rename("sample" = "PMC_ID", "Responder Type" = "Reason for cessation (numbered)") %>%
+  mutate(
+    `Responder Type` = case_when(
+      `Responder Type` == 1 ~ "Exceptional",
+      `Responder Type` == 2 ~ "Standard",
+      `Responder Type` == 3 ~ "Poor"
+    )
+  )
+
+myClinicalColors <- c("Exceptional" = "#1f77b4", "Standard" = "#FFD700", "Poor" = "#d62728")
+
+# Sort by responder type
+sorted_samples <- clinical_data_print %>%
+  arrange(`Responder Type`) %>%
+  pull(sample)
+
+ClinicalData <- Clinical(inputData = clinical_data_print, palette = myClinicalColors, legendColumns = 2)
+
+## Variant data generator
+generate_variant_data <- function(timepoint_label) {
+  variant_data <- read_excel("C:/Users/Daniel/OneDrive - Monash University/Documents/University/GNA5900/combined_variants.xlsx")
+  CNV_data <- read_excel("C:/Users/Daniel/OneDrive - Monash University/Documents/University/GNA5900/combined_cnvs.xlsx")
+  
+  combined_variants <- bind_rows(variant_data, CNV_data)
+
+  combined_variants <- combined_variants %>%
+    filter(plp == "Y") %>%
+    filter(case_when(
+      timepoint_label == "1.0" ~ !grepl("1\\.1|1\\.2|1\\.3|2\\.0|-1-1", sample),
+      timepoint_label == "1.1" ~ grepl("1\\.1|-1-1", sample),
+      timepoint_label == "1.2" ~ grepl("1\\.2", sample),
+      timepoint_label == "2.0" ~ grepl("1\\.3|2\\.0", sample),
+      TRUE ~ FALSE
+    )) %>%
+    mutate(
+      sample = sub("^([A-Za-z]+-[0-9]{3}).*", "\\1", sample),
+      variant_type = trimws(variant_type),
+      variant_type = case_when(
+        grepl("Ter", protein_change, ignore.case = TRUE) ~ "nonsense",
+        grepl("fs\\*", protein_change, ignore.case = TRUE) ~ "frameshift",
+        grepl("c\\.[0-9]+[\\+\\-][0-9]+[A-Z]>[A-Z]", coding_change, ignore.case = TRUE) ~ "splice_region",
+        tolower(variant_type) %in% c("deletion", "complex") |
+          grepl("del", coding_change, ignore.case = TRUE) ~ "inframe_deletion",
+        tolower(variant_type) %in% c("insertion", "complex") |
+          grepl("ins", coding_change, ignore.case = TRUE) ~ "inframe_insertion",
+        grepl("p\\.[A-Z][a-z]{2}[0-9]+[A-Z][a-z]{2}", protein_change) &
+          tolower(variant_type) %in% c("snv", "complex") ~ "missense",
+        tolower(variant_type) == "snv" & is.na(coding_change) ~ "intergenic_SNV",
+        tolower(variant_type) == "het deletion" ~ "copy_loss",
+        tolower(variant_type) == "duplicate" ~ "copy_gain",
+        # grepl("=", protein_change, fixed = TRUE) ~ "synonymous",
+        # TRUE ~ "NA"
+      )
+    ) %>%
+    select(sample, variant_type, gene) %>%
+    rename(mutation = variant_type)
+  
+  return(data.frame(combined_variants))
+}
+
+## Generate and assign data frames for each timepoint
+timepoints <- list("1.0", "1.1", "1.2", "2.0")
+variant_data_list <- list()
+
+for (tp in timepoints) {
+  variant_data_list[[tp]] <- generate_variant_data(tp)
+  assign(paste0("variants_", gsub("\\.", "_", tp)), variant_data_list[[tp]])
+}
+```
+```{r}
+library(ggplot2)
+
+newLayerB <- list(theme(axis.text.y=element_text(color="black", size=5)))
+
+p_1.0 <- Waterfall(variant_data_list$`1.0`, mutationHierarchy = my_mutation_hierarchy, clinical = ClinicalData, plotATally = "complex", plotBTally = "complex", plotBLayers = newLayerB)
+p_1.1 <- Waterfall(variant_data_list$`1.1`, mutationHierarchy = my_mutation_hierarchy, clinical = ClinicalData, plotATally = "complex", plotBTally = "complex", plotBLayers = newLayerB)
+p_1.2 <- Waterfall(variant_data_list$`1.2`, mutationHierarchy = my_mutation_hierarchy, clinical = ClinicalData, plotATally = "complex", plotBTally = "complex", plotBLayers = newLayerB)
+p_1.3 <- Waterfall(variant_data_list$`2.0`, mutationHierarchy = my_mutation_hierarchy, clinical = ClinicalData, plotATally = "complex", plotBTally = "complex", plotBLayers = newLayerB)
+
+
+drawPlot(p_1.0)
+drawPlot(p_1.1)
+drawPlot(p_1.2)
+drawPlot(p_1.3)
+```
+
+
+Make an oncoprint using ComplexHeatmap
+
+```{r}
+# Required libraries
+library(ComplexHeatmap)
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(circlize)
+library(tibble)
+
+# Load data
+variant_data <- read_excel("C:/Users/Daniel/OneDrive - Monash University/Documents/University/GNA5900/combined_variants.xlsx")
+CNV_data <- read_excel("C:/Users/Daniel/OneDrive - Monash University/Documents/University/GNA5900/combined_cnvs.xlsx")
+OncoPrintRun <- function(timepoint_label) {
+  combined_variants <- read_excel("C:/Users/Daniel/OneDrive - Monash University/Documents/University/GNA5900/results/compiled_patient_data.xlsx")
+  
+  combined_variants <- combined_variants %>%
+    filter(plp == "Y") %>%
+    filter(timepoint == timepoint_label) %>%
+    mutate(
+      sample = sub("^(PMC-[0-9]{3}).*", "\\1", sample),
+      variant_type = trimws(variant_type),
+      variant_type = case_when(
+        grepl("Ter", protein_change, ignore.case = TRUE) ~ "nonsense",
+        grepl("fs\\*", protein_change, ignore.case = TRUE) ~ "frameshift",
+        grepl("c\\.[0-9]+[\\+\\-][0-9]+[A-Z]>[A-Z]", coding_change, ignore.case = TRUE) ~ "splice region",
+        tolower(variant_type) %in% c("deletion", "complex") |
+          grepl("del", coding_change, ignore.case = TRUE) ~ "inframe deletion",
+        tolower(variant_type) %in% c("insertion", "complex") |
+          grepl("ins", coding_change, ignore.case = TRUE) ~ "inframe insertion",
+        grepl("p\\.[A-Z][a-z]{2}[0-9]+[A-Z][a-z]{2}", protein_change) &
+          tolower(variant_type) %in% c("snv", "complex") ~ "missense",
+        tolower(variant_type) == "snv" & is.na(coding_change) ~ "intergenic SNV",
+        tolower(variant_type) == "het deletion" ~ "copy loss",
+        tolower(variant_type) == "duplicate" ~ "copy gain"
+      )
+    )
+  
+  
+  clinical_data <- read_excel("C:/Users/Daniel/OneDrive - Monash University/Documents/University/GNA5900/clinical_data.xlsx")
+  
+  # Optional: filter to relevant samples or genes
+  # variants <- variants %>% filter(variant_type != "Synonymous")
+  
+  # Check for duplicates
+  dups <- combined_variants %>%
+    count(sample, gene) %>%
+    filter(n > 1)
+  
+  # Remove exact duplicate entries for the same sample-gene-variant
+  combined_variants <- combined_variants %>%
+    filter(!is.na(variant_type)) %>%  # Exclude NAs here
+    distinct(sample, gene, variant_type) %>%
+    group_by(sample, gene) %>%
+    summarise(variant_type = paste(unique(variant_type), collapse = ";"), .groups = "drop") %>%
+    pivot_wider(names_from = gene, values_from = variant_type)
+  
+  mat <- as.data.frame(combined_variants)
+  rownames(mat) <- mat$sample
+  mat$sample <- NULL
+  mat[is.na(mat)] <- ""
+  
+  # Create annotation for response status
+  sample_order <- rownames(mat)
+  
+  annotation_df <- clinical_data %>%
+    filter(PMC_ID %in% sample_order) %>%
+    select(PMC_ID, `Reason for cessation (numbered)`) %>%
+    mutate(
+      response_status = case_when(
+        `Reason for cessation (numbered)` == 1 ~ "exceptional",
+        `Reason for cessation (numbered)` == 2 ~ "standard",
+        `Reason for cessation (numbered)` == 3 ~ "poor"
+      ),
+      response_status = factor(response_status, levels = c("exceptional", "standard", "poor"))
+    ) %>%
+    column_to_rownames("PMC_ID")
+  
+  # Reorder and keep only samples present in both datasets
+  annotation_df <- annotation_df[intersect(sample_order, rownames(annotation_df)), , drop = FALSE]
+  mat <- mat[rownames(annotation_df), , drop = FALSE]
+  
+  # Reorder to match the matrix
+  annotation_df <- annotation_df[rownames(mat), , drop = FALSE]
+  
+  ha <- HeatmapAnnotation(
+    Response = annotation_df$response_status,
+    col = list(Response = c(good = "forestgreen", poor = "firebrick", other = "grey")),
+    annotation_name_side = "left"
+  )
+  
+  variant_colours <- c(
+    nonsense = "#d73027",           # red
+    frameshift = "#fc8d59",         # orange
+    `splice region` = "#fee090",      # light yellow
+    `inframe deletion` = "#91bfdb",   # sky blue
+    `inframe insertion` = "#4575b4",  # deep blue
+    missense = "#1a9850",           # green
+    `intergenic SNV` = "#d9ef8b",     # lime
+    `copy loss` = "#762a83",          # purple
+    `copy gain` = "#af8dc3",           # lavender
+    `NA` = "#BBBBBB"
+  )
+  
+  # Define alter_fun dynamically from variant_colours
+  alter_fun <- lapply(names(variant_colours), function(vt) {
+    force(vt)
+    function(x, y, w, h) grid.rect(x, y, w*0.9, h*0.9,
+                                   gp = gpar(fill = variant_colours[vt], col = NA))
+  })
+  names(alter_fun) <- names(variant_colours)
+  
+  # Add background function
+  alter_fun$background <- function(x, y, w, h) {
+    grid.rect(x, y, w, h, gp = gpar(fill = "#F0F0F0", col = NA))
+  }
+  
+  # Colour mapping
+  col <- variant_colours
+  
+  ha <- rowAnnotation(
+    Response = annotation_df$response_status,
+    col = list(Response = c(exceptional = "#1f77b4", poor = "#d62728", standard = "#FFD700")),
+    annotation_name_side = "top"
+  )
+  
+  mat_t <- t(mat)
+  
+  ha_t <- HeatmapAnnotation(
+    Response = annotation_df$response_status,
+    col = list(Response = c(exceptional = "#1f77b4", poor = "#d62728", standard = "#FFD700")),
+    annotation_name_side = "right"
+  )
+  
+  ht <- oncoPrint(mat_t,
+            alter_fun = alter_fun,
+            col = col,
+            top_annotation = ha_t,
+            show_column_names = FALSE,      # Hide long sample names on X if messy
+            show_row_names = TRUE,          # Genes are now on Y-axis
+            row_names_gp = gpar(fontsize = 3.5),
+            show_pct = F,
+            #column_title = "Mutation Landscape",
+            heatmap_legend_param = list(),
+            alter_fun_is_vectorized = FALSE)
+  
+            lgd <- Legend(
+              title = "Variant Type",
+              at = names(variant_colours),
+              legend_gp = gpar(fill = variant_colours),
+              direction = "horizontal",      # Layout horizontally
+              nrow = 2                       # Optional: use 2 rows if too wide
+            )
+            
+            draw(ht, heatmap_legend_list = list(lgd), 
+                 heatmap_legend_side = "bottom", 
+                 annotation_legend_side = "bottom")
+  
+  png_filename <- paste0("C:/Users/Daniel/OneDrive - Monash University/Documents/University/GNA5900/figures/oncoprint_2.0_", timepoint_label, ".png")
+  png(png_filename, width = 2500, height = 1400, res = 300)
+  draw(ht, heatmap_legend_list = list(lgd), 
+     heatmap_legend_side = "bottom", 
+     annotation_legend_side = "bottom",
+     show_heatmap_legend = FALSE)
+  dev.off()
+  # lgd <- Legend(
+  #   title = "Variant Type",
+  #   at = names(variant_colours),
+  #   legend_gp = gpar(fill = variant_colours),
+  #   direction = "horizontal",      # Layout horizontally
+  #   nrow = 2                       # Optional: use 2 rows if too wide
+  # )
+  # draw(ht, heatmap_legend_list = list(lgd),
+  #      # heatmap_legend_side = "bottom", 
+  #      # annotation_legend_side = "bottom",
+  #      show_heatmap_legend = FALSE)
+  #   dev.off()
+  
+  # Also show interactively
+  draw(ht, heatmap_legend_list = list(lgd), 
+     heatmap_legend_side = "bottom", 
+     annotation_legend_side = "bottom",
+     show_heatmap_legend = FALSE)
+}
+
+timepoints <- list("1.0", "1.1", "1.2", "2.0")
+
+for (tp in timepoints) {
+  OncoPrintRun(tp)
+}
+```
+Plots only the exceptional responders.
+```{R}
+# Required libraries
+library(ComplexHeatmap)
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(circlize)
+library(tibble)
+library(stringr)
+
+OncoPrintRunGood <- function(timepoint_label) {
+  combined_variants <- read_excel(
+    "C:/Users/Daniel/OneDrive - Monash University/Documents/University/GNA5900/results/compiled_patient_data.xlsx"
+  ) %>%
+    filter(plp == "Y", timepoint == timepoint_label) %>%
+    mutate(
+      sample       = sub("^(PMC-[0-9]{3}).*", "\\1", sample),
+      variant_type = trimws(variant_type),
+      variant_type = case_when(
+        grepl("Ter", protein_change, ignore.case = TRUE)              ~ "nonsense",
+        grepl("fs\\*", protein_change, ignore.case = TRUE)            ~ "frameshift",
+        grepl("c\\.[0-9]+[\\+\\-][0-9]+[A-Z]>[A-Z]", coding_change,
+              ignore.case = TRUE)                                     ~ "splice region",
+        tolower(variant_type) %in% c("deletion", "complex") |
+          grepl("del", coding_change, ignore.case = TRUE)            ~ "inframe deletion",
+        tolower(variant_type) %in% c("insertion", "complex") |
+          grepl("ins", coding_change, ignore.case = TRUE)            ~ "inframe insertion",
+        grepl("p\\.[A-Z][a-z]{2}[0-9]+[A-Z][a-z]{2}", protein_change) &
+          tolower(variant_type) %in% c("snv", "complex")             ~ "missense",
+        tolower(variant_type) == "snv" & is.na(coding_change)         ~ "intergenic SNV",
+        tolower(variant_type) == "het deletion"                       ~ "copy loss",
+        tolower(variant_type) == "duplicate"                          ~ "copy gain",
+        TRUE                                                          ~ NA_character_
+      ),
+      gene = str_replace_all(gene, "_", " ")
+    ) %>%
+    filter(!is.na(variant_type))
+
+  # Collapse to one row per sample–gene
+  combined_variants <- combined_variants %>%
+    distinct(sample, gene, variant_type) %>%
+    group_by(sample, gene) %>%
+    summarise(
+      variant_type = paste(unique(variant_type), collapse = ";"),
+      .groups      = "drop"
+    ) %>%
+    pivot_wider(names_from = gene, values_from = variant_type)
+
+  mat <- as.data.frame(combined_variants)
+  rownames(mat) <- mat$sample
+  mat$sample <- NULL
+  mat[is.na(mat)] <- ""   # empty string = no variant
+
+  # Filter for ERs
+  clinical_data <- read_excel(
+    "C:/Users/Daniel/OneDrive - Monash University/Documents/University/GNA5900/clinical_data.xlsx"
+  )
+
+  annotation_df <- clinical_data %>%
+    select(PMC_ID, `Reason for cessation (numbered)`) %>%
+    mutate(
+      response_status = case_when(
+        `Reason for cessation (numbered)` == 1 ~ "exceptional",
+        `Reason for cessation (numbered)` == 2 ~ "standard",
+        `Reason for cessation (numbered)` == 3 ~ "poor"
+      ),
+      response_status = factor(response_status,
+                               levels = c("exceptional", "standard", "poor"))
+    ) %>%
+    column_to_rownames("PMC_ID") %>%
+    filter(response_status == "exceptional")
+
+  mat <- mat[rownames(mat) %in% rownames(annotation_df), , drop = FALSE]
+  annotation_df <- annotation_df[rownames(mat), , drop = FALSE]
+
+  mat_t <- t(mat)
+
+  # Calculate per-gene mutational frequency
+  freq_per_gene <- rowSums(mat_t != "", na.rm = TRUE)
+
+  # Select top 20 genes
+  top10_genes <- names(sort(freq_per_gene, decreasing = TRUE))[1:20]
+
+  # If fewer than 10 genes present, take all:
+  top10_genes <- intersect(top10_genes, rownames(mat_t))
+
+  mat_t_top10 <- mat_t[top10_genes, , drop = FALSE]
+
+  variant_colours <- c(
+    nonsense        = "#d73027",
+    frameshift      = "#fc8d59",
+    `splice region` = "#fee090",
+    `inframe deletion`   = "#91bfdb",
+    `inframe insertion`  = "#4575b4",
+    missense        = "#1a9850",
+    `intergenic SNV`     = "#d9ef8b",
+    `copy loss`           = "#762a83",
+    `copy gain`           = "#af8dc3",
+    `NA`             = "#BBBBBB"
+  )
+
+  alter_fun <- lapply(names(variant_colours), function(vt) {
+    force(vt)
+    function(x, y, w, h) {
+      grid.rect(x, y, w * 0.9, h * 0.9,
+                gp = gpar(fill = variant_colours[vt], col = NA))
+    }
+  })
+  names(alter_fun) <- names(variant_colours)
+
+  # background squares
+  alter_fun$background <- function(x, y, w, h) {
+    grid.rect(x, y, w, h, gp = gpar(fill = "#F0F0F0", col = NA))
+  }
+
+  # Create oncoprint
+  ht <- oncoPrint(
+    mat_t_top10,
+    alter_fun             = alter_fun,
+    col                   = variant_colours,
+    top_annotation        = NULL,
+    show_column_names     = FALSE,
+    show_row_names        = TRUE,
+    row_names_gp          = gpar(fontsize = 8),
+    show_pct              = FALSE,
+    heatmap_legend_param  = list(),
+    alter_fun_is_vectorized = FALSE
+  )
+
+  png_filename <- paste0(
+    "C:/Users/Daniel/OneDrive - Monash University/Documents/University/GNA5900/figures/",
+    "oncoprint_good_", timepoint_label, ".png"
+  )
+  png(png_filename, width = 2000, height = 1200, res = 300)
+  draw(ht)
+  dev.off()
+
+  draw(ht)
+}
+
+## Run function for all timepoints
+timepoints <- list("1.0", "1.1", "1.2", "2.0")
+for (tp in timepoints) {
+  OncoPrintRunGood(tp)
+}
+```
+
+Compiles four oncoprints into a panel figure. Poorly proportioned -- do not use.
+
+```{r}
+library(ComplexHeatmap)
+library(ggplot2)
+library(cowplot)
+library(grid)
+
+# Create a list to store grobs
+plot_list <- list()
+
+# Timepoints
+timepoints <- list("1.0", "1.1", "1.2", "2.0")
+
+# Collect each heatmap as a grob
+for (tp in timepoints) {
+  g <- grid.grabExpr(OncoPrintRun(tp))
+  plot_list[[tp]] <- g
+}
+
+# Convert each grob into a cowplot-compatible ggdraw object
+gg_list <- lapply(plot_list, function(grob) {
+  ggdraw() + draw_grob(grob)
+})
+
+# Arrange them using plot_grid
+final_plot <- plot_grid(plotlist = gg_list, ncol = 2)
+print(final_plot)
+
+ggsave("C:/Users/Daniel/OneDrive - Monash University/Documents/University/GNA5900/figures/oncoprint_panel.png", 
+       plot = final_plot,
+       dpi = 600)
+```

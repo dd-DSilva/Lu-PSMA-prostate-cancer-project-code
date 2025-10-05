@@ -1,0 +1,351 @@
+---
+title: "R Notebook"
+output:
+  pdf_document: default
+  html_notebook: default
+---
+
+Here is a summary of patient data:
+
+| Variable      | Result      |
+| ------------- | ------------- |
+| How many pts received all 6 cycles of LuPSMA? | 43 |
+| Median baseline PSA (ng/ml) | 74.23 |
+| Median baseline PSA of ERs only | 42.0 |
+| No. of patients that had a PSA50 | 86 |
+| No. of ERs that had a PSA50 | 23 |
+| Median PSAPFS_time | 5.0 |
+| Median PSAPFS_time of ERs only | 11.67 |
+| How many ERs had a high PSMA SUVmean? | 11 |
+| Not including the ERs, how many patients had a high PSMA SUVmean? | 36 |
+
+Code is written below.
+
+
+Load libraries.
+
+```{r}
+library(readxl)
+library(dplyr)
+library(ggplot2)
+library(cowplot)
+```
+
+
+First, load in the file of patient data. The spreadsheet of interest was extracted and converted into .xlsx.
+
+```{r}
+clinical_data <- read_excel("C:/Users/Daniel/Documents/University/GNA5900/patient_list.xlsx")
+```
+
+
+This code creates a data frame containing only the patients who underwent 6 cycles of treatment.
+
+```{r}
+full_treatment_patients <- clinical_data %>% filter(`Number of cycles of LuPSMA` == "6")
+count(full_treatment_patients) 
+# There are 43 patients who received all 6 cycles of treatment.
+```
+
+
+This code records the median baseline PSA of all patients.
+
+```{r}
+# Baseline PSA is in column 7
+median(clinical_data$baseline_PSA)
+# The median baseline PSA for all patients is 74.23
+```
+
+This code records the median baseline PSA of specifically the exceptional responder patients. This code also creates a data frame of specifically exceptional responders.
+
+```{r}
+# Responder status is given in a numerical form in column 5
+# 1 = exceptional response
+er_patients <- clinical_data %>% filter(`Reason for cessation (numbered)` == "1")
+median(er_patients$baseline_PSA)
+# The median baseline PSA for all patients is 42.0
+```
+
+This code records the number of patients that had a PSA50 response at week 6.
+```{r}
+sum(clinical_data$PSA50)
+# 86 patients exhibited PSA50 out of 150 total
+```
+
+
+This code records the number of specifically exceptional responders that had a PSA50 response at week 6.
+```{r}
+sum(er_patients$PSA50)
+# 23 patients exhibited PSA50 out of 25 total
+```
+
+
+This code records the median PSA progression-free survival time. 
+```{r}
+median(clinical_data$PSAPFS_time)
+# Median PSAPFS time is 5.0
+```
+
+
+This code records the median PSAPFS time for specifically exceptional responders. 
+```{r}
+median(er_patients$PSAPFS_time)
+# Median PSAPFS time is 11.67
+```
+
+
+This code counts the number of exceptional responders with a high PSMA SUVmean.
+```{r}
+sum(er_patients$HighPSMAUptakeSUVmean10plus)
+# 11 ERs (out of 25) exhibited a high PSA SUVmean.
+```
+
+
+This code counts the number of *non-exceptional responders* with a high PSMA SUVmean. It also creates a data frame containing all the non-exceptional responders.
+```{r}
+non_er_patients <- clinical_data %>% filter(`Reason for cessation (numbered)` != "1")
+sum(non_er_patients$HighPSMAUptakeSUVmean10plus, na.rm = T)
+# 36 ERs (out of 125) exhibited a high PSA SUVmean.
+```
+
+This code creates a line graph of average PSA across the four timepoints of the study (error bars show SEM). Figure A shows exceptional responders and figure B shows all other patients
+```{r}
+# Take the average PSA at each timepoint and store that in a vector
+
+# These columns must first be cast to numeric
+er_patients$`6 week PSA` <- as.numeric(er_patients$`6 week PSA`)
+er_patients$`18 week PSA` <- as.numeric(er_patients$`18 week PSA`)
+
+ER_PSA <- as.numeric()
+ER_PSA[1] <- mean(er_patients$baseline_PSA)
+ER_PSA[2] <- mean(er_patients$`6 week PSA`, na.rm = T)
+ER_PSA[3] <- mean(er_patients$`18 week PSA`, na.rm = T)
+ER_PSA[4] <- mean(er_patients$`PSA at progression value or last known PSA`, na.rm = T)
+
+std.error <- function(x) sd(x, na.rm = T)/sqrt(length(x))
+
+ER_PSA_sd <- as.numeric()
+ER_PSA_sd[1] <- std.error(er_patients$baseline_PSA)
+ER_PSA_sd[2] <- std.error(er_patients$`6 week PSA`)
+ER_PSA_sd[3] <- std.error(er_patients$`18 week PSA`)
+ER_PSA_sd[4] <- std.error(er_patients$`PSA at progression value or last known PSA`)
+
+ER_PSA_df <- tibble(
+  PSA = ER_PSA,
+  sd = ER_PSA_sd,
+  timepoints = factor(c("Baseline", "6 weeks", "18 weeks", "Progression"),
+                      levels = c("Baseline", "6 weeks", "18 weeks", "Progression"))
+)
+
+non_er_patients$`6 week PSA` <- non_er_patients$`6 week PSA`
+non_er_patients$`18 week PSA` <- non_er_patients$`18 week PSA`
+non_er_patients$`6 week PSA` <- as.numeric(non_er_patients$`6 week PSA`)
+non_er_patients$`18 week PSA` <- as.numeric(non_er_patients$`18 week PSA`)
+
+N_ER_PSA <- as.numeric()
+N_ER_PSA[1] <- mean(non_er_patients$baseline_PSA)
+N_ER_PSA[2] <- mean(non_er_patients$`6 week PSA`, na.rm = T)
+N_ER_PSA[3] <- mean(non_er_patients$`18 week PSA`, na.rm = T)
+N_ER_PSA[4] <- mean(non_er_patients$`PSA at progression value or last known PSA`, na.rm = T)
+
+std.error <- function(x) sd(x, na.rm = T)/sqrt(length(x))
+
+N_ER_PSA_sd <- as.numeric()
+N_ER_PSA_sd[1] <- std.error(non_er_patients$baseline_PSA)
+N_ER_PSA_sd[2] <- std.error(non_er_patients$`6 week PSA`)
+N_ER_PSA_sd[3] <- std.error(non_er_patients$`18 week PSA`)
+N_ER_PSA_sd[4] <- std.error(non_er_patients$`PSA at progression value or last known PSA`)
+
+N_ER_PSA_df <- tibble(
+  PSA = N_ER_PSA,
+  sd = N_ER_PSA_sd,
+  timepoints = factor(c("Baseline", "6 weeks", "18 weeks", "Progression"),
+                      levels = c("Baseline", "6 weeks", "18 weeks", "Progression"))
+)
+
+# Generate the plot
+er_plot <- ggplot(data = ER_PSA_df, aes(x = timepoints, y = PSA)) +
+  geom_errorbar(aes(ymin = PSA - sd, ymax = PSA + sd), width = .2) +
+  geom_line(aes(y = PSA, group=1)) +
+  geom_point() +
+  labs(x = "Time (weeks)") + 
+  labs(y = "PSA (ng/mL)") +
+  ggtitle("Exceptional responders")
+
+n_er_plot <- ggplot(data = N_ER_PSA_df, aes(x = timepoints, y = PSA)) +
+  geom_errorbar(aes(ymin = PSA - sd, ymax = PSA + sd), width = .2) +
+  geom_line(aes(y = PSA, group=1)) +
+  geom_point() +
+  labs(x = "Time (weeks)") + 
+  labs(y = "PSA (ng/mL)") +
+  ggtitle("Non-exceptional responders")
+
+plot_row <- plot_grid(er_plot, n_er_plot, labels=c("A", "B"))
+
+# Adds overall figure title
+title <- ggdraw() + 
+  draw_label(
+    "Change in average PSA",
+    fontface = 'bold',
+    x = 0,
+    hjust = 0
+  ) +
+  theme(
+    plot.margin = margin(0, 0, 0, 7)
+  )
+plot_grid(
+  title, plot_row,
+  ncol = 1,
+  rel_heights = c(0.1, 1)
+)
+```
+
+
+This code creates a line graph of average PSA over time during the course of treatment (error bars show SEM). Figure A shows exceptional responders and figure B shows all other patients
+```{r}
+# Take the average PSA at each timepoint and store that in a vector
+
+# These columns must first be cast to numeric
+er_patients$`6 week PSA` <- as.numeric(er_patients$`6 week PSA`)
+er_patients$`18 week PSA` <- as.numeric(er_patients$`18 week PSA`)
+
+ER_PSA <- as.numeric()
+ER_PSA[1] <- mean(er_patients$baseline_PSA)
+ER_PSA[2] <- mean(er_patients$`6 week PSA`, na.rm = T)
+ER_PSA[3] <- mean(er_patients$`18 week PSA`, na.rm = T)
+
+std.error <- function(x) sd(x, na.rm = T)/sqrt(length(x))
+
+ER_PSA_sd <- as.numeric()
+ER_PSA_sd[1] <- std.error(er_patients$baseline_PSA)
+ER_PSA_sd[2] <- std.error(er_patients$`6 week PSA`)
+ER_PSA_sd[3] <- std.error(er_patients$`18 week PSA`)
+
+ER_PSA_df <- tibble(
+  PSA = ER_PSA,
+  sd = ER_PSA_sd,
+  timepoints = c(0, 6, 18)
+)
+
+non_er_patients$`6 week PSA` <- as.numeric(non_er_patients$`6 week PSA`)
+non_er_patients$`18 week PSA` <- as.numeric(non_er_patients$`18 week PSA`)
+
+N_ER_PSA <- as.numeric()
+N_ER_PSA[1] <- mean(non_er_patients$baseline_PSA)
+N_ER_PSA[2] <- mean(non_er_patients$`6 week PSA`, na.rm = T)
+N_ER_PSA[3] <- mean(non_er_patients$`18 week PSA`, na.rm = T)
+
+std.error <- function(x) sd(x, na.rm = T)/sqrt(length(x))
+
+N_ER_PSA_sd <- as.numeric()
+N_ER_PSA_sd[1] <- std.error(non_er_patients$baseline_PSA)
+N_ER_PSA_sd[2] <- std.error(non_er_patients$`6 week PSA`)
+N_ER_PSA_sd[3] <- std.error(non_er_patients$`18 week PSA`)
+
+N_ER_PSA_df <- tibble(
+  PSA = N_ER_PSA,
+  sd = N_ER_PSA_sd,
+  timepoints = c(0, 6, 18)
+)
+
+# Generate the plot
+er_plot <- ggplot(data = ER_PSA_df, aes(x = timepoints, y = PSA)) +
+  geom_errorbar(aes(ymin = PSA - sd, ymax = PSA + sd), width = .8) +
+  geom_line() +
+  geom_point() +
+  labs(x = "Time (weeks)") + 
+  labs(y = "PSA (ng/mL)") +
+  ggtitle("Exceptional responders")
+
+n_er_plot <- ggplot(data = N_ER_PSA_df, aes(x = timepoints, y = PSA)) +
+  geom_errorbar(aes(ymin = PSA - sd, ymax = PSA + sd), width = .8) +
+  geom_line() +
+  geom_point() +
+  labs(x = "Time (weeks)") + 
+  labs(y = "PSA (ng/mL)") +
+  ggtitle("Non-exceptional responders")
+
+plot_row <- plot_grid(er_plot, n_er_plot, labels=c("A", "B"))
+
+# Adds overall figure title
+title <- ggdraw() + 
+  draw_label(
+    "On-treatment PSA dyamics",
+    fontface = 'bold',
+    x = 0,
+    hjust = 0
+  ) +
+  theme(
+    plot.margin = margin(0, 0, 0, 7)
+  )
+plot_grid(
+  title, plot_row,
+  ncol = 1,
+  rel_heights = c(0.1, 1)
+)
+```
+
+
+
+```{r}
+##install.packages("ggplot2", dependencies=TRUE)
+
+
+#Load packages
+library(ggplot2)
+library(dplyr)
+library(survival)
+library(readxl)
+
+library(survminer)
+
+#load data
+my_data <- read_excel("C:/Users/Daniel/Documents/University/GNA5900/patient_list.xlsx", sheet = 1)
+glimpse(my_data)
+
+# Get the survival curve by x groups
+psapfs.surv <- survfit(Surv(PSAPFS_time, PSAPFS_status) ~ cessation_number, data = my_data)
+
+
+# Get the median time
+print(psapfs.surv)
+
+#Kaplan-meier curve
+require("survival")
+fit <- survfit(Surv(PSAPFS_time, PSAPFS_status) ~ cessation_number, data = my_data)
+
+ggsurvplot(
+  fit,
+  data = my_data,
+  size = 1.1,                                                       #change line size
+  palette = c("#3063cf", "#dd3006", "#7B02A5"),                     #custom color palettes
+  conf.int = FALSE,                                                 #Add confidence interval
+  pval = TRUE,                                                      #Add p-value and edit size/location
+  pval.size = 4,
+  pval.coord = c(4.4,0.002),
+  font.x = c(12, "bold", "black"),                                  #change font for x axis
+  font.y = c(12, "bold", "black"),                                  #change font for y axis
+  legend.title = "",                                                #change legend title
+  font.legend = c(12, "plain", "black"),                            #change legend font
+  font.tickslab = c(14),
+  surv.median.line = "hv",                                          #add the median survival pointer
+  xlim = c(0, 7), ylim = c(0, 1),
+  surv.scale = c("percent"),                                        #changes y axis to % instead of 0-1
+  risk.table = TRUE,                                                #Add risk table
+  risk.table.col = "strata",                                        #Risk table color by groups
+  legend.labs = c("1", "2", "3"),  # Reduced length to 3
+                                                                    #Change legend labels
+  risk.table.height = 0.3,                                          #Useful to change when you have multiple groups
+  risk.table.y.text = TRUE,                                         #If FALSE show bars instead of names in text annotations
+  risk.table.title = "Number at risk",                              #title of risk table
+  risk.table.fontsize = 5,                                          #font size risk table text
+  xlab = "Time (months)",                                           #customize X axis label
+  ylab = "PSA progression-free survival",                           #customize y axis label
+  break.time.by = 1,                                                #break X axis in time intervals
+  ggtheme = theme_classic2()                                        #Change ggplot2 theme
+
+
+  )
+
+summary(fit)$table
+```

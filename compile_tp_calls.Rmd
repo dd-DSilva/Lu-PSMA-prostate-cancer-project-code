@@ -1,0 +1,244 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+Load libraries.
+
+```{r}
+library(readxl)
+library(stringr)
+library(dplyr)
+library(writexl)
+```
+
+
+First, the requisite spreadsheets are loaded in and the data is transferred to a data frame.
+
+```{r}
+# Define the folder path
+folder_path <- "E:/Daniel/vcf-files-for-curation-2.0"
+
+# List all .xlsx files, excluding temporary Excel files (those starting with "~$")
+files <- list.files(folder_path, pattern = "^[^~$].*\\.xlsx$", full.names = TRUE)
+
+# Load only the first sheet from each file, reading without headers
+data_list <- lapply(files, function(f) {
+  df <- read_excel(f, sheet = 1, col_names = FALSE)  # Read without column names
+  colnames(df) <- as.character(df[2, ])  # Use the second row as column names
+  df <- df[-c(1,2), ]  # Remove the first and second rows
+  return(df)
+})
+
+# Name the list elements based on file names
+names(data_list) <- basename(files)
+
+combined_data <- suppressMessages(bind_rows(data_list, .id = "source_file"))
+
+print(files)
+#print(combined_data)
+```
+
+False positives and headers are removed from the data.
+
+```{R}
+for (i in nrow(combined_data):1) {        # Loop through all rows in reverse order to avoid index shifting
+  if (!grepl("TP", combined_data[i, 2])) {  # Check if "TP" is not in column 2 for the i-th row
+    combined_data <- combined_data[-i, ]   # Remove the i-th row and update the data frame
+  }
+}
+
+print(combined_data)
+```
+
+
+Extract only the desired columns from this data frame into a new one.
+
+```{R}
+final_data <- data.frame(sample = rep(NA, nrow(combined_data)),
+                         location = rep(NA, nrow(combined_data)),
+                         genotype = rep(NA, nrow(combined_data)),
+                         variant_type = rep(NA, nrow(combined_data)),
+                         is_germline = rep(NA, nrow(combined_data)),
+                         vaf = rep(NA, nrow(combined_data)),
+                         gene = rep(NA, nrow(combined_data)),
+                         coding_change = rep(NA, nrow(combined_data)),
+                         protein_change = rep(NA, nrow(combined_data)),
+                         cosmic_id = rep(NA, nrow(combined_data)),
+                         cadd_phred = rep(NA, nrow(combined_data)),
+                         cnv_state = rep(NA, nrow(combined_data)),
+                         acmg_criteria = rep(NA, nrow(combined_data)),
+                         evidence = rep(NA, nrow(combined_data)),
+                         varseq_classification = rep(NA, nrow(combined_data)),
+                         clinvar_classification = rep(NA, nrow(combined_data))
+                         )
+
+
+final_data$sample <- combined_data$`SAMPLE`
+final_data$location <- combined_data$`Chr:Pos`
+final_data$genotype <- combined_data$`Ref/Alt...4`
+final_data$variant_type <- combined_data$`TYPE`
+
+for (i in nrow(combined_data):1) { # Handles germline
+  if (combined_data$`STATUS`[i] == "Germline") {
+    final_data$is_germline[i] <- "Y"
+  }
+  else {
+    final_data$is_germline[i] <- "N"
+  }
+}
+
+final_data$vaf <- combined_data$`Variant Allele Freq...13`
+final_data$gene <- combined_data$`Gene Names`
+final_data$coding_change <- combined_data$`HGVS c. (Clinically Relevant)`
+final_data$protein_change <- combined_data$`HGVS p. (Clinically Relevant)`
+final_data$cosmic_id <- combined_data$`Mutation ID`
+final_data$cadd_phred <- combined_data$`PHRED Score`
+final_data$cnv_state <- combined_data$`CNV State`
+final_data$acmg_criteria <- combined_data$`ACMG Classification Criteria`
+final_data$evidence <- combined_data$`ACMG Classification Criteria Description`
+final_data$varseq_classification <- combined_data$`Classification...58`
+final_data$clinvar_classification <- combined_data$`Classification...39`
+
+#print(final_data)
+```
+
+
+Finally, the data frame is extracted in the form of another .xlsx file.
+
+```{r}
+write_xlsx(final_data, "C:/Users/Daniel/Documents/University/GNA5900/2.0_tp_variants.xlsx")
+```
+
+
+
+This code extracts misaligned variants.
+
+```{r}
+# Identify correct batch of variant calls
+folder_path <- "E:/Daniel/vcf-files-for-curation-1.2" # Change this as needed
+files <- list.files(folder_path, pattern = "^[^~$].*\\.xlsx$", full.names = TRUE)
+data_list_N <- lapply(files, function(f) read_excel(f, sheet = 1))
+names(data_list_N) <- basename(files)
+combined_data_N <- bind_rows(data_list_N, .id = "source_file")
+
+# Filter N variants
+for (i in nrow(combined_data_N):1) {
+  if (!grepl("N", combined_data_N[i, 2]) || grepl("=", combined_data_N[i, 2])) {
+    combined_data_N <- combined_data_N[-i, ]
+  }
+}
+
+print(combined_data_N)
+```
+This code generates a list of exceptional responder patients and filters a given list of files against it. Then, it copies those files into an appropriate folder and renames them.
+
+```{r}
+## Do not touch this
+## This is what generates the list of ER patients to filter files against
+folder_path_ER <- "E:/Daniel/vcf-files-for-curation-1.0"
+file_paths_ER <- list.files(folder_path_ER, full.names = TRUE)
+file_paths_ER <- gsub(".*(PMC-\\d+).*", "\\1", file_paths_ER)
+
+folder_path_filter <- "E:/ProsTIC/LuPSMA_VariantsForCuration/HaveBeenCurated"
+file_paths_filter <- list.files(folder_path_filter, full.names = TRUE)
+
+## Change this line to the correct timepoint
+common_files <- file_paths_filter[grepl(".*(PMC-\\d+).*", file_paths_filter)]
+common_files <- common_files[grepl("-1\\.1", common_files)]
+common_files <- common_files[sapply(common_files, function(f) {
+  any(sapply(file_paths_ER, function(tag) grepl(tag, f)))
+})]
+
+matching_files <- file_paths_filter[sapply(file_paths_filter, function(f) {
+  any(sapply(common_files, function(tag) grepl(tag, f)))
+})]
+
+
+source_folder <- folder_path_filter
+new_names <- gsub(".*(PMC-\\d+).*", "\\1-1.1.xlsx", common_files)
+destination_folder <- "E:/Daniel/vcf-files-for-curation-1.1"
+files_to_copy <- file.copy(common_files, file.path(destination_folder, new_names))
+print("Files copied successfully!")
+```
+
+This code retrieves all patients and identifies which of their samples are present.
+Unfinished
+
+```{r}
+folder_path_sum <- "E:/Daniel/vcf-files-for-curation-1.0"
+file_paths_sum <- list.files(folder_path_sum, full.names = TRUE)
+file_paths_sum <- gsub(".*(PMC-\\d+).*", "\\1", file_paths_sum)
+```
+This code compiles all the CNV variant data for all patients in a group, and filters out germline CNVs and those outside the gene list.
+
+```{r}
+folder_path <- "E:/Daniel/vcf-files-for-curation-1.1"
+
+files <- list.files(folder_path, pattern = "^[^~$].*\\.xlsx$", full.names = TRUE)
+
+data_list <- lapply(files, function(f) {
+  sheet_names <- excel_sheets(f)
+  matching_sheets <- sheet_names[grepl("Filter CNVs", sheet_names)]
+  if (length(matching_sheets) > 0) {
+    df <- read_excel(f, sheet = matching_sheets[1], col_names = FALSE)
+    colnames(df) <- as.character(df[2, ])
+    df <- df[-c(1,2), ]
+    return(df)
+  } else {
+    return(NULL)
+  }
+})
+
+names(data_list) <- str_extract(basename(files), "(PMC-\\d{3})")
+combined_data <- suppressMessages(bind_rows(data_list, .id = "sample"))
+#print(combined_data)
+
+gene_list <- readLines("C:/Users/Daniel/Documents/University/GNA5900/genenamesV3.txt")
+clinical_data <- read_excel("C:/Users/Daniel/Documents/University/GNA5900/er_real_variants_list.xlsx", sheet = 1, col_names = T)
+
+combined_data <- left_join(combined_data, clinical_data, by = c("sample" = "PMC_ID"))
+
+
+# Remove CNVs in the germline, and those not within our gene list
+combined_data <- combined_data %>% filter(sapply(`Gene List`, function(x) any(sapply(gene_list, function(g) grepl(g, x)))))
+combined_data <- combined_data[!is.null(combined_data[, 12]), ]
+combined_data <- combined_data %>% filter(as.numeric(`ctDNA fraction_1.1`) > 0.2 | as.numeric(`ctDNA fraction_1.1`) %>% is.na)
+
+final_data <- combined_data %>%
+  transmute(
+    sample = sample,
+    location = `Region...1`,
+    type = Type,
+    targets = `# Targets`,
+    samples = `# Samples`,
+    span = `Span...5`,
+    cnv_state = `CNV State...6`,
+    is_broad = if_else(str_detect(`Gene List`, ","), "Y", "N"),
+    flags = `Flags...7`,
+    mean_depth = `Avg Target Mean Depth...8`,
+    z_score = `Avg Z Score...9`,
+    ratio = `Avg Ratio...10`,
+    p_value = `p-value...17`,
+    gene_list = `Gene List`,
+    critical_gene_list = `Critical Gene List`,
+    classification = Classification,
+    criteria = Criteria,
+    impact_score = `Potential Gene Impact Scores`,
+    copy_number = `Estimated Copy Number`,
+    copy_number_probability = `Copy Number Probability`
+  )
+
+write_xlsx(final_data, "C:/Users/Daniel/Documents/University/GNA5900/1.1_cnv.xlsx")
+```
+
+
+This code identifies PLP variants from a file. 
+
+```{r}
+variant_df <- read_excel("C:/Users/Daniel/Documents/University/GNA5900/2.0_tp_variants.xlsx")
+
+plp <- variant_df %>% filter(grepl("Pathogenic", classification) & !grepl("VUS", classification))
+
+write_xlsx(plp, "C:/Users/Daniel/Documents/University/GNA5900/2.0_plp.xlsx")
+```

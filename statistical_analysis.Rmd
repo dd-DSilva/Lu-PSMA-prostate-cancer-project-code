@@ -1,0 +1,194 @@
+---
+title: "Statistical Analysis"
+output: html_notebook
+---
+
+Load libraries.
+
+```{r}
+library(readxl)
+library(tidyverse)
+```
+
+
+Creates a bar chart showing the number of TP variants in each gene for a given cohort. 
+
+```{r}
+# Load the data
+variant_df <- read_excel("C:/Users/Daniel/OneDrive - Monash University/Documents/University/GNA5900/combined_variants.xlsx")
+
+# Standardise is_germline column if needed
+variant_df <- variant_df %>%
+  mutate(is_germline = str_trim(toupper(is_germline)))
+
+variant_df <- variant_df %>% filter(!grepl("1.1", sample) & !grepl("1.2", sample) & !grepl("2.0", sample))
+
+# Create a count table including all combinations
+count <- variant_df %>%
+  count(gene, is_germline, name = "number")
+
+# # Count *only* somatic variants per gene (for ordering)
+# somatic_count <- count %>%
+#   filter(is_germline == "N") %>%
+#   select(gene, number) %>%
+#   rename(somatic_number = number)
+# 
+# # Merge somatic count back with full list to preserve all genes
+# gene_order <- count %>%
+#   left_join(somatic_count, by = "gene") %>%
+#   mutate(somatic_number = replace_na(somatic_number, 0)) %>%
+#   distinct(gene, somatic_number) %>%
+#   arrange(desc(somatic_number)) %>%
+#   pull(gene)
+
+gene_order <- count %>%
+  group_by(gene) %>%
+  summarise(total_number = sum(number)) %>%
+  arrange(desc(total_number)) %>%
+  pull(gene)
+
+count <- count %>%
+  mutate(is_germline = factor(is_germline, levels = c("Y", "N")))
+
+# Plot
+ggplot(count, aes(x = factor(gene, levels = gene_order), y = number, fill = is_germline)) +
+  geom_bar(stat = "identity") +
+  geom_hline(yintercept = 7, linetype = "dashed", colour = "red") +  # <--- added line
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, size = 6)) +
+  labs(x = "Gene", y = "Count", title = "Count of variants per gene in full cohort (baseline)", fill = "Variant Type") +
+  scale_fill_manual(
+    values = c("N" = "orange", "Y" = "skyblue"),
+    labels = c("N" = "Somatic", "Y" = "Germline")
+  )
+```
+
+This code collects all the non-ER variants from a specific timepoint in the combined file and then plots them as shown above.
+
+```{r}
+# Load the data
+variant_df <- read_excel("C:/Users/Daniel/OneDrive - Monash University/Documents/University/GNA5900/pr_real_variants.xlsx")
+
+# Filter for specific timepoint (change as needed)
+variant_df <- variant_df %>% filter(grepl("1.0", Sample_ID))
+
+# Select only SNVs or only CNVs
+variant_df <- variant_df %>% filter(!grepl("-", `Chr:Pos`))
+
+# Standardise is_germline column if needed
+variant_df <- variant_df %>%
+  mutate(
+    STATUS = str_trim(toupper(STATUS)),
+    STATUS = case_when(
+      STATUS == "LIKELYSOMATIC" ~ "STRONGSOMATIC",
+      TRUE ~ STATUS
+    )
+  )
+
+# Create a count table including all combinations
+count <- variant_df %>%
+  count(Name, STATUS, name = "number")
+
+# Count *only* somatic variants per gene (for ordering)
+somatic_count <- count %>%
+  filter(STATUS == "STRONGSOMATIC") %>%
+  select(Name, number) %>%
+  rename(somatic_number = number)
+
+# Merge somatic count back with full list to preserve all genes
+gene_order <- count %>%
+  left_join(somatic_count, by = "Name") %>%
+  mutate(somatic_number = replace_na(somatic_number, 0)) %>%
+  distinct(Name, somatic_number) %>%
+  arrange(desc(somatic_number)) %>%
+  pull(Name)
+
+count <- count %>%
+  mutate(STATUS = factor(STATUS, levels = c("GERMLINE", "STRONGSOMATIC")))
+
+# Plot
+ggplot(count, aes(x = factor(Name, levels = gene_order), y = number, fill = STATUS)) +
+  geom_bar(stat = "identity") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, size = 6)) +
+  labs(x = "Gene", y = "Count", title = "Count of variants per gene in PRs (1.0)", fill = "Variant Type") +
+  scale_fill_manual(
+    values = c("STRONGSOMATIC" = "orange", "GERMLINE" = "skyblue"),
+    labels = c("STRONGSOMATIC" = "Somatic", "GERMLINE" = "Germline")
+  )
+```
+
+Calculates ctDNA fraction for each person in a given cohort. Individuals without any TP variant calls are not included.
+
+```{r}
+# Retrieve all the VCFs of a given timepoint 
+folder_path <- "E:/Daniel/vcf-files-for-curation-1.0"
+files <- list.files(folder_path, pattern = "^[^~$].*\\.xlsx$", full.names = TRUE)
+
+# Load the lists of CNVs and lists of other variants in separate data frames 
+data_list <- lapply(files, function(f) {
+  
+  variants <- read_excel(f, sheet = 1, col_names = FALSE)
+  colnames(variants) <- as.character(variants[2, ])  # Use the second row as column names
+  colnames(variants)[1:2] <- c("curation", "is_known")
+  variants <- variants[-c(1,2), ]  # Remove the first and second rows
+  variants <- variants[, c(1:20)]  # Remove columns after 20
+  
+  if (length(excel_sheets(f)) >= 4) {
+    cnvs <- read_excel(f, sheet = 4, col_names = FALSE)
+    colnames(cnvs) <- as.character(cnvs[2, ])
+    cnvs <- cnvs[-c(1,2), ]
+    cnvs <- cnvs[, c(1:11)]  # Remove columns after 11
+    colnames(cnvs) <- trimws(colnames(cnvs)) 
+  } else {
+    cnvs <- NULL
+  }
+  #print(colnames(cnvs))
+    
+  list(variants = variants, cnvs = cnvs, file = basename(f))
+})
+
+# Exclude FPs, X chromosome and germline variants, and regions with a duplication
+filtered_variants <- lapply(data_list, function(entry) {
+  variants <- entry$variants
+  cnvs <- entry$cnvs
+  
+  if (is.null(variants)) return(NULL)
+  
+  filtered <- filter(
+    variants, !str_detect(`Chr:Pos`, "X") & 
+    `Germline Variants` == "False" &
+    str_detect(`curation`, "TP"))
+  
+  if (!is.null(cnvs)) {
+    if ("CNV State" %in% colnames(cnvs)) {
+      duplicated_genes <- cnvs %>% filter(`CNV State` == "Duplicate") %>% pull(1)
+      filtered <- filtered %>% filter(!(.[[12]] %in% duplicated_genes))
+    } else {
+      cnv_filtered <- NULL
+    }  
+  }
+  
+
+  filtered$sample <- entry$file
+  #print(filtered)
+  return(filtered)
+})
+
+
+# Calculate ctDNA fraction for each sample
+frac_list <- lapply(filtered_variants, function(entry) {
+  filtered_data <- entry
+  
+  filtered_data$file_name <- entry$sample
+  
+  result <- filtered_data %>%
+  summarise(
+      file_name = first(file_name),
+      ctDNA_frac = 2 / ((1 / max(as.numeric(`Variant Allele Freq`), na.rm = TRUE)) + 1),
+      .groups = "drop"
+    )
+  return(result)
+})
+
+final_result <- bind_rows(frac_list)
+print(final_result)
+```

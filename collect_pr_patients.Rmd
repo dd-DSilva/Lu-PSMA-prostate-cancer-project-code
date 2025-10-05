@@ -1,0 +1,110 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+Load libraries.
+
+```{r}
+library(readxl)
+library(dplyr)
+library(writexl)
+```
+
+
+This code uses the file of clinical data to make a list of poor responder patients, and then extracts files relating to those patients from a given folder.
+
+```{r}
+clinical_data <- read_excel("C:/Users/Daniel/Documents/University/GNA5900/patient_list.xlsx")
+
+poor_responders <- clinical_data %>% filter(cessation_number == 3)
+
+folder_path_filter <- "E:/ProsTIC/LuPSMA_VariantsForCuration/HaveBeenCurated"
+file_paths_filter <- list.files(folder_path_filter, full.names = TRUE)
+
+## Change this line to the correct timepoint
+common_files <- file_paths_filter[grepl(".*(PMC-\\d+).*", file_paths_filter)]
+common_files <- common_files[grepl("-1\\.2", common_files)]
+common_files <- common_files[sapply(common_files, function(f) {
+  any(sapply(poor_responders$PMC_ID, function(tag) grepl(tag, f)))
+})]
+
+matching_files <- file_paths_filter[sapply(file_paths_filter, function(f) {
+  any(sapply(common_files, function(tag) grepl(tag, f)))
+})]
+
+## Change these lines to the correct timepoint
+# source_folder <- folder_path_filter
+# new_names <- gsub(".*(PMC-\\d+).*", "\\1-1.1.xlsx", common_files)
+# destination_folder <- "E:/Daniel/vcf-files-for-curation-1.1_pr"
+# files_to_copy <- file.copy(common_files, file.path(destination_folder, new_names))
+# print("Files copied successfully!")
+
+length(matching_files)
+```
+
+
+Takes the sheet of combined poor responder data and converts it into the format of the ER sheets.
+
+```{r}
+variant_df <- read_excel("C:/Users/Daniel/Documents/University/GNA5900/pr_real_variants.xlsx")
+
+variant_df <- variant_df %>% filter(!grepl("-", `Chr:Pos`))
+
+final_data <- variant_df %>%
+  transmute(
+    sample = Sample_ID,
+    location = `Chr:Pos`,
+    genotype = `Ref/Alt`,
+    variant_type = `TYPE`,
+    is_germline = if_else(str_detect(`STATUS`, "Somatic"), "N", "Y"),
+    vaf = `Variant Allele Freq`,
+    gene = Name,
+    coding_change = `HGVS c. (Clinically Relevant)`,
+    protein_change = `HGVS p. (Clinically Relevant)`,
+    cosmic_id = `Mutation ID`,
+    cadd_phred = `PHRED Score`,
+    cnv_state = `CNV State`,
+    acmg_criteria = `ACMG Classification Criteria`,
+    evidence = `ACMG Classification Criteria Description`,
+    varseq_classification = `Classification...29`,
+    clinvar_classification = `Classification...25`
+  )
+
+write_xlsx(final_data, "C:/Users/Daniel/Documents/University/GNA5900/all_pr_variants.xlsx")
+```
+
+
+Does the same thing with the CNVs instead.
+
+```{r}
+variant_df <- read_excel("C:/Users/Daniel/Documents/University/GNA5900/pr_real_variants.xlsx")
+
+variant_df <- variant_df %>% filter(grepl("-", `Chr:Pos`))
+
+final_data <- variant_df %>%
+  transmute(
+    sample = Sample_ID,
+    location = `Chr:Pos`,
+    type = TYPE,
+    targets = NA,
+    samples = NA,
+    span = `Span`,
+    cnv_state = `CNV State`,
+    is_broad = "N",
+    flags = `Flags`,
+    mean_depth = NA,
+    z_score = NA,
+    ratio = `Avg Ratio`,
+    p_value = `p-value`,
+    gene_list = `Name`,
+    critical_gene_list = NA,
+    classification = `Classification...29`,
+    criteria = `Criteria`,
+    impact_score = NA,
+    copy_number = NA,
+    copy_number_probability = `Copy Number Probability`
+  )
+
+write_xlsx(final_data, "C:/Users/Daniel/Documents/University/GNA5900/all_pr_CNV.xlsx")
+```

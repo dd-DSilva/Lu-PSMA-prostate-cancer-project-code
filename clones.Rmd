@@ -1,0 +1,191 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+Identifies clonal variants (VAF > 0.25 * ctDNA frac for autosomal variants, or > 0.5 * ctDNA frac for X-linked)
+
+```{r}
+library(readxl)
+library(tidyverse)
+library(openxlsx)
+
+
+clinical_data <- read_excel("C:/Users/Daniel/OneDrive - Monash University/Documents/University/GNA5900/clinical_data.xlsx")
+
+variant_data <- read_excel("C:/Users/Daniel/OneDrive - Monash University/Documents/University/GNA5900/combined_variants.xlsx")
+CNV_data <- read_excel("C:/Users/Daniel/OneDrive - Monash University/Documents/University/GNA5900/combined_cnvs.xlsx", sheet = 1)
+combined_data <- bind_rows(variant_data, CNV_data)
+
+## Assign each variant a timepoint so we can check the correct ctDNA frac column
+combined_data <- combined_data %>%
+  mutate(
+    timepoint = case_when(
+      grepl("1\\.1|-1-1", sample) ~ "1.1",
+      grepl("1\\.2", sample) ~ "1.2",
+      grepl("1\\.3|2\\.0", sample) ~ "1.3/2.0",
+      !grepl("1\\.1|1\\.2|1\\.3|2\\.0|-1-1", sample) ~ "1.0",
+      TRUE ~ NA_character_
+    ),
+    PMC_ID = sub("^([A-Za-z]+-[0-9]{3}).*", "\\1", sample)
+  ) %>%
+  filter(is_germline == "N")
+
+## Attach correct value of ctDNA frac to each variant
+clinical_long <- clinical_data %>%
+  pivot_longer(
+    cols = starts_with("ctDNA fraction_"),
+    names_to = "timepoint",
+    names_prefix = "ctDNA fraction_",
+    values_to = "ctDNA_frac"
+  )
+
+combined_data <- combined_data %>%
+  left_join(clinical_long, by = c("PMC_ID", "timepoint")) %>%
+  mutate(vaf = as.numeric(vaf))
+
+## Mark variants as clonal based on ctDNA frac
+clonal_variants <- combined_data %>%
+  mutate(
+    is_clonal = !is.na(ctDNA_frac) & ((
+        grepl("X", location) & vaf > 0.5 * ctDNA_frac
+      ) | (
+        !grepl("X", location) & vaf > 0.25 * ctDNA_frac
+      )
+    ),
+    # What proportion of ctDNA fragments are expected to contain this variant?
+    proportion_of_ctdna = ifelse(ctDNA_frac > 0, vaf / ctDNA_frac, NA)
+  )
+
+## Retrieve list of specifically newly-arisen clones
+clonal_variants <- clonal_variants %>%
+  mutate(
+    timepoint = factor(timepoint, levels = c("1.0", "1.1", "1.2", "1.3/2.0"), ordered = TRUE),
+    variant_id = paste(gene, location, sep = "_")  # create unique ID
+  )
+
+emerging_clones <- clonal_variants %>%
+  group_by(sample, variant_id) %>%
+  summarise(
+    clonal_1.0 = any(is_clonal[timepoint == "1.0"], na.rm = TRUE),
+    clonal_later = any(is_clonal[timepoint != "1.0"], na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  filter(!clonal_1.0 & clonal_later)
+
+prog_clones <- clonal_variants %>%
+  group_by(sample, variant_id) %>%
+  summarise(
+    #clonal_prog = any(is_clonal[timepoint == "1.2" | timepoint == "1.3/2.0"], na.rm = TRUE),
+    clonal_prog = any(is_clonal[timepoint == "1.3/2.0"], na.rm = TRUE),
+    clonal_1.0 = any(is_clonal[timepoint == "1.0"], na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  filter(!clonal_1.0 & clonal_prog)
+
+clones_after_1.0 <- clonal_variants %>%
+  semi_join(emerging_clones, by = c("sample", "variant_id"))
+clones_at_progression <- clonal_variants %>%
+  semi_join(prog_clones, by = c("sample", "variant_id")) %>%
+  filter(plp == "Y") %>%
+  filter(`Reason for cessation (numbered)` == 1)
+
+count(clones_after_1.0, gene, sort = T)
+count(clones_after_1.0, variant_id, sort = T)
+count(clones_at_progression, PMC_ID, sort = T)
+
+write.xlsx(clonal_variants, file = "C:/Users/Daniel/OneDrive - Monash University/Documents/University/GNA5900/clonal_variants.xlsx")
+```
+Generates a clonal evolution plot. This won't nessesarily give an accurate display of clonal evolution; the purpose is to visualise variants changing over time.
+
+```{r}
+library(clevRvis)
+library(mclust)
+
+clonal_variants <- read_excel("C:/Users/Daniel/OneDrive - Monash University/Documents/University/GNA5900/clonal_variants.xlsx")
+
+## Perform clustering with MClust to generate a matrix of clones across time
+
+# Variant matrix
+## Every column is a timepoint; every row is a variant
+## Numbers must be entered manually from clonal_variants.xlsx
+timepoints <- c(0, 1, 3)
+fracTable <- matrix(c(22, 36, 51,
+                      0, 14, 26,
+                      9, 51, 26,
+                      23, 15, 50,
+                      0, 10, 0,
+                      51, 0, 0,
+                      24, 0, 0
+),
+                    nrow = 7,
+  ncol = length(timepoints),
+  byrow = TRUE
+)
+
+fit <- Mclust(fracTable, G = 2:7)
+cluster_assignments <- fit$classification
+cluster_assignments
+
+df <- as.data.frame(fracTable)
+df$clone <- cluster_assignments
+
+# Aggregate by clone (e.g. average)
+fracTable_clone <- df %>%
+  group_by(clone) %>%
+  summarise(across(everything(), ~mean(.x, na.rm = TRUE))) %>%
+  #summarise(across(everything(), mean)) %>%
+  ungroup() %>%
+  select(-clone) %>%
+  as.matrix()
+
+fracTable_clone[fracTable_clone == 0] <- 0.1
+fracTable_clone <- apply(fracTable_clone, 2, function(x) x / sum(x) * 100)
+
+col_sums <- colSums(fracTable_clone)
+print(col_sums)
+
+# If any column sum is > 100, those siblings would violate clevRvis’s requirement:
+which(col_sums > 100)
+
+## identifies parent and child clones
+infer_parents <- function(fracTable) {
+  n_clones <- nrow(fracTable)
+  parents <- integer(n_clones)
+  
+  for (i in 1:n_clones) {
+    best_parent <- 0
+    best_score <- Inf
+    
+    for (j in 1:n_clones) {
+      if (j == i) next
+      
+      # Child's frequency should be less than or equal to parent’s at all time points
+      if (all(fracTable[i, ] <= fracTable[j, ])) {
+        score <- sum((fracTable[i, ] - fracTable[j, ])^2)
+        if (score < best_score) {
+          best_score <- score
+          best_parent <- j
+        }
+      }
+    }
+    
+    parents[i] <- best_parent
+  }
+  
+  return(parents)
+}
+
+## Generates the 'sea object' that clevRvis uses to make plots
+parents <- infer_parents(fracTable_clone)
+parents <- rep(0, nrow(fracTable_clone))
+
+seaObject <- createSeaObject(fracTable_clone, parents, timepoints, timepointInterpolation = F)
+
+## Creates the clonal mutation plot
+dolphinPlot(seaObject, showLegend = T, 
+            vlines = timepoints(seaObject), 
+            vlab = timepoints(seaObject), vlabSize = 2, 
+            ylab = 'Fraction of total ctDNA',
+            markMeasuredTimepoints = timepoints)
+```

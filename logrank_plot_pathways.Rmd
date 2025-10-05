@@ -1,0 +1,221 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+library(tidyverse)
+library(ggplot2)
+library(cowplot)
+library(survival)
+library(survminer)
+library(readxl)
+library(writexl)
+
+#load data
+clinical_data <- read_excel("C:/Users/Daniel/OneDrive - Monash University/Documents/University/GNA5900/clinical_data.xlsx")
+variant_data <- read_excel("C:/Users/Daniel/OneDrive - Monash University/Documents/University/GNA5900/combined_variants.xlsx")
+CNV_data <- read_excel("C:/Users/Daniel/OneDrive - Monash University/Documents/University/GNA5900/combined_cnvs.xlsx", sheet = 1)
+#glimpse(my_data)
+
+
+missense_data <- variant_data %>% filter((variant_type == "SNV" | variant_type == "Complex") &
+                                           !grepl("Ter", protein_change) &
+                                           !grepl("=", protein_change) &
+                                           !grepl("\\+", coding_change) &
+                                           !grepl("\\-", coding_change))
+synonymous_data <- variant_data %>% filter((variant_type == "SNV" | variant_type == "Complex") & grepl("=", protein_change))
+inframe_data <- variant_data %>% filter((variant_type == "SNV" | variant_type == "Complex") & !grepl("\\*", protein_change))
+truncate_data <- variant_data %>% filter(grepl("\\*", protein_change) | grepl("Ter", protein_change))
+intronic_data <- variant_data %>% filter(grepl("\\+", coding_change) | grepl("\\-", coding_change))
+deletion_data <- CNV_data %>% filter(grepl("deletion", variant_type) | grepl("Deletion", variant_type))
+duplication_data <- CNV_data %>% filter(grepl("Duplicate", variant_type))
+combined_snv_data <- variant_data
+combined_data <- bind_rows(variant_data, CNV_data)
+
+
+gene_types_raw <- read_excel("C:/Users/Daniel/OneDrive - Monash University/Documents/University/GNA5900/variant_classes.xlsx")
+gene_type_map <- gene_types_raw %>%
+  pivot_longer(
+    cols = everything(),
+    names_to = "gene_type",
+    values_to = "gene"
+  ) %>%
+  filter(!is.na(gene))
+```
+
+```{r}
+plot_km_for_pathway <- function(pathway_name, data, data_name = "data", metric="OS") {
+  pathway_genes <- gene_types_raw[[pathway_name]] %>% na.omit() %>% unique()
+  
+  plp_data <- data %>%
+    left_join(gene_type_map, by = "gene") %>%
+    filter(!is.na(gene)) %>%
+    filter(!grepl("1\\.1|1\\.2|1\\.3|2\\.0|-1-1", sample)) %>%
+    mutate(PMC_ID = sub("^([A-Za-z]+-[0-9]{3}).*", "\\1", sample)) %>%
+    filter(plp == "Y" & gene %in% pathway_genes) %>%
+    distinct(PMC_ID) %>%
+    mutate(pathway_mutated = 1)
+
+  # All patients (mutation = 0 by default)
+  my_data <- clinical_data %>%
+    select(PMC_ID,
+           `ctDNA fraction_1.0`,
+           OS_status,
+           OS_time,
+           PSAPFS_status,
+           PSAPFS_time) %>%
+    left_join(plp_data, by = "PMC_ID") %>%
+    mutate(pathway_mutated = ifelse(is.na(pathway_mutated), 0, pathway_mutated))
+
+  if (data_name %in% c("CNV_data", "combined_data")) {
+    my_data <- my_data %>% filter(`ctDNA fraction_1.0` > 0.2)
+  } else {
+    my_data <- my_data %>% filter(`ctDNA fraction_1.0` > 0.0)
+  }
+
+  n_wt <- sum(my_data$pathway_mutated == 0)
+  n_mut <- sum(my_data$pathway_mutated == 1)
+
+  if (n_wt == 0 || n_mut == 0) return(NA_real_)
+  if (n_mut <= 5) {
+    message("Skipping pathway '", pathway_name, "' in data '", data_name,
+            "': only ", n_mut, " mutated patients.")
+    return(NA_real_)
+  }
+
+  survdiff_obj <- survdiff(
+    as.formula("Surv(OS_time, OS_status) ~ pathway_mutated"),
+    #as.formula("Surv(PSAPFS_time, PSAPFS_status) ~ pathway_mutated"),
+    data = my_data
+  )
+  raw_p <- 1 - pchisq(survdiff_obj$chisq, df = 1)
+
+  km_fit <- survfit(
+    as.formula("Surv(OS_time, OS_status) ~ pathway_mutated"),
+    #as.formula("Surv(PSAPFS_time, PSAPFS_status) ~ pathway_mutated"),
+    data = my_data
+  )
+
+  km_plot <- ggsurvplot(
+    km_fit,
+    data             = my_data,
+    size             = 1.1,
+    palette          = c("#3063cf", "#dd3006"),
+    conf.int         = FALSE,
+    pval             = TRUE,
+    pval.size        = 4,
+    pval.coord       = c(4.4, 0.002),
+    font.x           = c(12, "bold", "black"),
+    font.y           = c(12, "bold", "black"),
+    legend.title     = "",
+    font.legend      = c(12, "plain", "black"),
+    font.tickslab    = c(14),
+    surv.median.line = "hv",
+    xlim             = c(0, 21),
+    ylim             = c(0, 1),
+    surv.scale       = "percent",
+    risk.table       = TRUE,
+    risk.table.col   = "strata",
+    legend.labs      = c(paste(pathway_name, "wild-type"),
+                         paste(pathway_name, "variant")),
+    risk.table.height  = 0.3,
+    risk.table.y.text  = TRUE,
+    risk.table.title   = "Number at risk",
+    risk.table.fontsize = 5,
+    xlab  = "Time (months)",
+    ylab  = ifelse(metric == "OS",
+                   "Overall survival",
+                   "PSA progression-free survival"),
+    break.time.by = 3,
+    ggtheme       = theme_cowplot()
+  )
+  
+  safe_name <- gsub("[^A-Za-z0-9_]", "_", tolower(pathway_name))
+  output_path <- paste0(
+    "C:/Users/Daniel/OneDrive - Monash University/Documents/University/GNA5900/figures/",
+    #safe_name, "_pfs_", tolower(data_name), ".png"
+    safe_name, "_os_", tolower(data_name), ".png"
+  )
+  cat("Exporting to:", output_path, "\n")
+
+  #ggsave(output_path, km_plot$plot, width = 10, height = 6, dpi = 600)
+  
+  # ggpubr::ggexport(
+  #   km_plot,
+  #   filename = paste0(
+  #     "C:/Users/Daniel/OneDrive - Monash University/Documents/University/GNA5900/figures/",
+  #     tolower(pathway_name), "_pfs_", tolower(data_name), ".png"
+  #   ),
+  #   width  = 8000,
+  #   height = 4500,
+  #   res    = 600
+  # )
+  
+  #print(km_plot)
+
+  return(raw_p)
+}
+```
+
+```{r}
+gene_types <- colnames(gene_types_raw)
+
+raw_pvals <- list()
+
+data_names <- c("missense_data", "synonymous_data", "inframe_data",
+                "truncate_data", "intronic_data", "deletion_data",
+                "duplication_data", "combined_snv_data", "combined_data", "CNV_data")
+
+for (pathway in gene_types) {
+  for (data_name in data_names) {
+    data_df <- get(data_name)
+    raw_p <- plot_km_for_pathway(pathway, data_df, data_name, metric = "OS")
+    key <- paste0(pathway, "_", data_name)
+    raw_pvals[[key]] <- raw_p
+  }
+}
+
+raw_pvals_vec <- unlist(raw_pvals)
+raw_pvals_vec_noNA <- raw_pvals_vec[!is.na(raw_pvals_vec)]
+adjusted_p <- p.adjust(raw_pvals_vec_noNA, method = "BH")
+
+# Step 1: Clean keys by removing _data suffix before splitting
+clean_keys <- gsub("_data$", "", names(adjusted_p))
+
+# Step 2: Split on the last underscore
+split_keys <- strsplit(clean_keys, "_(?=[^_]+$)", perl = TRUE)
+pathways <- sapply(split_keys, `[`, 1)
+variant_types <- sapply(split_keys, `[`, 2)
+
+# Step 3: Construct dataframe
+df_fdr <- data.frame(
+  pathway          = pathways,
+  variant_type     = variant_types,
+  raw_p_value      = raw_pvals_vec_noNA,
+  adjusted_p_value = adjusted_p,
+  stringsAsFactors = FALSE
+)
+
+df_fdr <- df_fdr %>% arrange(adjusted_p_value)
+
+# Handle NA entries
+na_tests <- names(raw_pvals_vec)[is.na(raw_pvals_vec)]
+if (length(na_tests) > 0) {
+  clean_na <- gsub("_data$", "", na_tests)
+  split_na <- strsplit(clean_na, "_(?=[^_]+$)", perl = TRUE)
+  na_pathways <- sapply(split_na, `[`, 1)
+  na_variant_types <- sapply(split_na, `[`, 2)
+
+  na_df <- data.frame(
+    pathway          = na_pathways,
+    variant_type     = na_variant_types,
+    raw_p_value      = NA_real_,
+    adjusted_p_value = NA_real_,
+    stringsAsFactors = FALSE
+  )
+  df_fdr <- bind_rows(df_fdr, na_df)
+}
+
+write_xlsx(df_fdr, "C:/Users/Daniel/OneDrive - Monash University/Documents/University/GNA5900/figures/pathway_os_km_pvalues.xlsx")
+```
